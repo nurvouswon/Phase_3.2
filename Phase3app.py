@@ -6,9 +6,12 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
+from sklearn.calibration import CalibratedClassifierCV
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
+import matplotlib.pyplot as plt
+from sklearn.calibration import calibration_curve
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -103,9 +106,10 @@ def downcast_df(df):
         df[col] = pd.to_numeric(df[col], downcast='integer')
     return df
 
-# ==== GAME DAY OVERLAY MULTIPLIERS ====
+# ==== GAME DAY OVERLAY MULTIPLIERS (CAPPED) ====
 def overlay_multiplier(row):
     multiplier = 1.0
+    # Wind
     wind_col = 'wind_mph'
     wind_dir_col = 'wind_dir_string'
     if wind_col in row and wind_dir_col in row:
@@ -116,11 +120,13 @@ def overlay_multiplier(row):
                 multiplier *= 1.08
             elif 'in' in wind_dir:
                 multiplier *= 0.93
+    # Temp
     temp_col = 'temp'
     if temp_col in row and pd.notnull(row[temp_col]):
         base_temp = 70
         delta = row[temp_col] - base_temp
         multiplier *= 1.03 ** (delta / 10)
+    # Humidity
     humidity_col = 'humidity'
     if humidity_col in row and pd.notnull(row[humidity_col]):
         hum = row[humidity_col]
@@ -128,10 +134,15 @@ def overlay_multiplier(row):
             multiplier *= 1.02
         elif hum < 40:
             multiplier *= 0.98
+    # Park
     park_hr_col = 'park_hr_rate'
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.85, min(1.20, float(row[park_hr_col])))
         multiplier *= pf
+    # ==== HARD CAP ====
+    overlay_cap = 1.15
+    overlay_floor = 0.85
+    multiplier = min(max(multiplier, overlay_floor), overlay_cap)
     return multiplier
 
 # ==== UI ====
@@ -148,7 +159,6 @@ if event_file is not None and today_file is not None:
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
 
-        # Check duplicate columns
         dupes_event = find_duplicate_columns(event_df)
         if dupes_event:
             st.error(f"Duplicate columns in event file after deduplication: {set(dupes_event)}")
@@ -157,6 +167,9 @@ if event_file is not None and today_file is not None:
         if dupes_today:
             st.error(f"Duplicate columns in today file after deduplication: {set(dupes_today)}")
             st.stop()
+
+        st.write(f"Loaded event-level: {getattr(event_file, 'name', 'event_file')} shape {event_df.shape}")
+        st.write(f"Loaded today: {getattr(today_file, 'name', 'today_file')} shape {today_df.shape}")
 
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
@@ -167,21 +180,44 @@ if event_file is not None and today_file is not None:
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
 
+    value_counts = event_df[target_col].value_counts(dropna=False).reset_index()
+    value_counts.columns = [target_col, 'count']
+    st.write("Value counts for hr_outcome:")
+    st.dataframe(value_counts)
+
+    st.write("Dropping columns with >25% missing or near-zero variance...")
     event_df, event_dropped = drop_high_na_low_var(event_df, thresh_na=0.25, thresh_var=1e-7)
     today_df, today_dropped = drop_high_na_low_var(today_df, thresh_na=0.25, thresh_var=1e-7)
+    st.write("Dropped columns from event-level data:")
+    st.write(event_dropped)
+    st.write("Dropped columns from today data:")
+    st.write(today_dropped)
 
+    # === CLUSTER-BASED FEATURE SELECTION ===
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     X_for_cluster = event_df[feature_cols]
     selected_features, clusters, cluster_dropped = cluster_select_features(X_for_cluster, threshold=0.95)
+    st.write(f"Feature clusters (threshold 0.95):")
+    for i, cluster in enumerate(clusters):
+        st.write(f"Cluster {i+1}: {cluster}")
+    st.write("Selected features from clusters:")
+    st.write(selected_features)
+    st.write("Dropped features from clusters:")
+    st.write(cluster_dropped)
 
+    # === FINAL PREP ===
     X = clean_X(event_df[selected_features])
     y = event_df[target_col]
     X_today = clean_X(today_df[selected_features], train_cols=X.columns)
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
+    st.write("DEBUG: X shape:", X.shape)
+    st.write("DEBUG: y shape:", y.shape)
+
+    st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
@@ -190,26 +226,17 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # Ensemble: tuned for class imbalance, reproducibility
+    # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
+    st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
-        n_estimators=100, max_depth=5, learning_rate=0.06, use_label_encoder=False, eval_metric='logloss',
-        n_jobs=1, verbosity=1, tree_method='hist', random_state=42
+        n_estimators=60, max_depth=5, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss',
+        n_jobs=1, verbosity=1, tree_method='hist'
     )
-    lgb_clf = lgb.LGBMClassifier(
-        n_estimators=100, max_depth=5, learning_rate=0.06, n_jobs=1, random_state=42, class_weight='balanced'
-    )
-    cat_clf = cb.CatBoostClassifier(
-        iterations=100, depth=5, learning_rate=0.07, verbose=0, thread_count=1, random_seed=42, auto_class_weights='Balanced'
-    )
-    rf_clf = RandomForestClassifier(
-        n_estimators=80, max_depth=7, n_jobs=1, random_state=42, class_weight='balanced'
-    )
-    gb_clf = GradientBoostingClassifier(
-        n_estimators=80, max_depth=5, learning_rate=0.07, random_state=42
-    )
-    lr_clf = LogisticRegression(
-        max_iter=1200, solver='lbfgs', n_jobs=1, random_state=42, class_weight='balanced'
-    )
+    lgb_clf = lgb.LGBMClassifier(n_estimators=60, max_depth=5, learning_rate=0.08, n_jobs=1)
+    cat_clf = cb.CatBoostClassifier(iterations=60, depth=5, learning_rate=0.09, verbose=0, thread_count=1)
+    rf_clf = RandomForestClassifier(n_estimators=40, max_depth=7, n_jobs=1)
+    gb_clf = GradientBoostingClassifier(n_estimators=40, max_depth=5, learning_rate=0.09)
+    lr_clf = LogisticRegression(max_iter=400, solver='lbfgs', n_jobs=1)
 
     model_status = []
     models_for_ensemble = []
@@ -255,23 +282,46 @@ if event_file is not None and today_file is not None:
         st.error("All models failed to train! Try reducing features or rows.")
         st.stop()
 
+    # =========== CALIBRATION (ISOTONIC REGRESSION) ===========
+    st.write("Fitting ensemble (soft voting)...")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
     ensemble.fit(X_train_scaled, y_train)
+    st.write("Fitting isotonic regression calibration...")
+    calibrated_ensemble = CalibratedClassifierCV(ensemble, method='isotonic', cv='prefit')
+    calibrated_ensemble.fit(X_val_scaled, y_val)
 
-    # === VALIDATION
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
+    # =========== VALIDATION ===========
+    st.write("Validating...")
+    y_val_pred = calibrated_ensemble.predict_proba(X_val_scaled)[:,1]
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
-    # === PREDICT
-    today_df['hr_probability'] = ensemble.predict_proba(X_today_scaled)[:,1]
+    # Optional: calibration curve
+    with st.expander("Show Calibration Curve (Validation Set)"):
+        fraction_of_positives, mean_predicted_value = calibration_curve(y_val, y_val_pred, n_bins=20)
+        fig, ax = plt.subplots(figsize=(6,6))
+        ax.plot(mean_predicted_value, fraction_of_positives, "s-", label="Calibrated")
+        ax.plot([0,1],[0,1], "--", color="k")
+        ax.set_xlabel("Predicted HR Probability")
+        ax.set_ylabel("Observed HR Rate")
+        ax.legend()
+        ax.set_title("Calibration Curve — Validation Set")
+        st.pyplot(fig)
 
-    # === OVERLAY SCORING
-    today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-    today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+    # =========== PREDICT ===========
+    st.write("Predicting HR probability for today...")
+    today_df['hr_probability'] = calibrated_ensemble.predict_proba(X_today_scaled)[:,1]
 
-    # === LEADERBOARD: Condensed, Top 15
+    # ==== APPLY OVERLAY SCORING ====
+    st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
+    if 'hr_probability' in today_df.columns:
+        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
+        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+    else:
+        today_df['final_hr_probability'] = today_df['hr_probability']
+
+    # ==== SHOW CONDENSED LEADERBOARD TOP 15 ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
@@ -281,7 +331,7 @@ if event_file is not None and today_file is not None:
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
-    st.markdown("### 🏆 **Top 15 HR Probabilities (Fully Overlaid, Condensed)**")
+    st.markdown("### 🏆 **Today's HR Probabilities & Overlay Multipliers — Top 15**")
     st.dataframe(leaderboard, use_container_width=True)
     st.download_button("⬇️ Download Full Prediction CSV", data=today_df.to_csv(index=False), file_name="today_hr_predictions.csv")
 
