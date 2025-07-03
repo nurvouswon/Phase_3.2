@@ -124,7 +124,9 @@ if event_file is not None and today_file is not None:
     with st.spinner("Loading and prepping files (1-2 min, be patient)..."):
         event_df = safe_read(event_file)
         today_df = safe_read(today_file)
-
+        # Drop columns that are all NaN in event or today df
+        event_df = event_df.dropna(axis=1, how='all')
+        today_df = today_df.dropna(axis=1, how='all')
         event_df = dedup_columns(event_df)
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
