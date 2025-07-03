@@ -64,7 +64,7 @@ def get_valid_feature_cols(df, drop=None):
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
 
-def drop_high_na_low_var(df, thresh_na=0.4, thresh_var=1e-9):
+def drop_high_na_low_var(df, thresh_na=1.0, thresh_var=0.0):
     cols_to_drop = []
     na_frac = df.isnull().mean()
     low_var_cols = df.select_dtypes(include=[np.number]).columns[df.select_dtypes(include=[np.number]).std() < thresh_var]
@@ -157,8 +157,11 @@ if event_file is not None and today_file is not None:
     value_counts.columns = [target_col, 'count']
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
-    event_df, event_dropped = drop_high_na_low_var(event_df, thresh_na=1.0, thresh_var=0.0)
-    today_df, today_dropped = drop_high_na_low_var(today_df, thresh_na=1.0, thresh_var=0.0)
+
+    # Only drop columns that are all NaN (no filtering on missing or variance)
+    event_df, _ = drop_high_na_low_var(event_df, thresh_na=1.0, thresh_var=0.0)
+    today_df, _ = drop_high_na_low_var(today_df, thresh_na=1.0, thresh_var=0.0)
+
     st.write("Remaining columns event-level:")
     st.write(list(event_df.columns))
     st.write("Remaining columns today:")
@@ -272,69 +275,21 @@ if event_file is not None and today_file is not None:
     else:
         st.warning("Tree model feature importances not available.")
 
-    # === FEATURE IMPORTANCE FILTERING & REDUCED ENSEMBLE ===
-    st.write("Selecting most important features based on mean tree importance (deep research filtering)...")
-    if tree_keys:
-        max_importance = import_df["importance"].max()
-        importance_threshold = max_importance * 0.05  # 5% of max importance, best-practice adaptive cutoff
-        keep_features = import_df[import_df["importance"] >= importance_threshold]["feature"].tolist()
-        st.info(f"Feature distillation: Keeping {len(keep_features)} of {len(X.columns)} features (threshold: {importance_threshold:.5f})")
-        X_reduced = X[keep_features]
-        X_today_reduced = X_today[keep_features]
-        X_train_r, X_val_r, y_train_r, y_val_r = train_test_split(
-            X_reduced, y, test_size=0.2, random_state=42, stratify=y
-        )
-        scaler_r = StandardScaler()
-        X_train_r_scaled = scaler_r.fit_transform(X_train_r)
-        X_val_r_scaled = scaler_r.transform(X_val_r)
-        X_today_r_scaled = scaler_r.transform(X_today_reduced)
-        # Refit ensemble
-        models_for_ensemble_r = []
-        try:
-            xgb_clf.fit(X_train_r_scaled, y_train_r)
-            models_for_ensemble_r.append(('xgb', xgb_clf))
-        except: pass
-        try:
-            lgb_clf.fit(X_train_r_scaled, y_train_r)
-            models_for_ensemble_r.append(('lgb', lgb_clf))
-        except: pass
-        try:
-            cat_clf.fit(X_train_r_scaled, y_train_r)
-            models_for_ensemble_r.append(('cat', cat_clf))
-        except: pass
-        try:
-            rf_clf.fit(X_train_r_scaled, y_train_r)
-            models_for_ensemble_r.append(('rf', rf_clf))
-        except: pass
-        try:
-            gb_clf.fit(X_train_r_scaled, y_train_r)
-            models_for_ensemble_r.append(('gb', gb_clf))
-        except: pass
-        try:
-            lr_clf.fit(X_train_r_scaled, y_train_r)
-            models_for_ensemble_r.append(('lr', lr_clf))
-        except: pass
-        st.write("Refitting distilled-feature ensemble...")
-        ensemble_r = VotingClassifier(estimators=models_for_ensemble_r, voting='soft', n_jobs=1)
-        ensemble_r.fit(X_train_r_scaled, y_train_r)
-        # Validation on reduced features
-        y_val_pred_r = ensemble_r.predict_proba(X_val_r_scaled)[:,1]
-        auc_r = roc_auc_score(y_val_r, y_val_pred_r)
-        ll_r = log_loss(y_val_r, y_val_pred_r)
-        st.success(f"Reduced-features Validation AUC: **{auc_r:.4f}** — LogLoss: **{ll_r:.4f}**")
-        # CALIBRATION (deep research: isotonic regression)
-        st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
-        ir = IsotonicRegression(out_of_bounds="clip")
-        y_val_pred_r_cal = ir.fit_transform(y_val_pred_r, y_val_r)
-        # Predict on today
-        st.write("Predicting HR probability for today (calibrated)...")
-        y_today_pred = ensemble_r.predict_proba(X_today_r_scaled)[:,1]
-        y_today_pred_cal = ir.transform(y_today_pred)
-        today_df['hr_probability'] = y_today_pred_cal
-    else:
-        # Fallback if no tree model importances available
-        st.warning("No feature filtering performed; using all features.")
-        today_df['hr_probability'] = ensemble.predict_proba(X_today_scaled)[:,1]
+    # =========== VALIDATION ===========
+    st.write("Validating...")
+    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
+    auc = roc_auc_score(y_val, y_val_pred)
+    ll = log_loss(y_val, y_val_pred)
+    st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
+
+    # =========== PREDICT (WITH ISOTONIC CALIBRATION) ===========
+    st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
+    ir = IsotonicRegression(out_of_bounds="clip")
+    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+    st.write("Predicting HR probability for today (calibrated)...")
+    y_today_pred = ensemble.predict_proba(X_today_scaled)[:,1]
+    y_today_pred_cal = ir.transform(y_today_pred)
+    today_df['hr_probability'] = y_today_pred_cal
 
     # ==== APPLY OVERLAY SCORING ====
     st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
