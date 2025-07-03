@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
+import matplotlib.pyplot as plt
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -24,11 +25,9 @@ def safe_read(path):
         return pd.read_csv(path, encoding='latin1', low_memory=False)
 
 def dedup_columns(df):
-    # Drop duplicate columns, keep first
     return df.loc[:, ~df.columns.duplicated()]
 
 def find_duplicate_columns(df):
-    # Returns list of duplicate column names
     return [col for col in df.columns if list(df.columns).count(col) > 1]
 
 def fix_types(df):
@@ -76,26 +75,6 @@ def drop_high_na_low_var(df, thresh_na=0.25, thresh_var=1e-7):
     df2 = df.drop(columns=cols_to_drop, errors="ignore")
     return df2, cols_to_drop
 
-def cluster_select_features(df, threshold=0.95):
-    corr = df.corr().abs()
-    clusters = []
-    selected = []
-    dropped = []
-    visited = set()
-    for col in corr.columns:
-        if col in visited:
-            continue
-        cluster = [col]
-        visited.add(col)
-        for other in corr.columns:
-            if other != col and other not in visited and corr.loc[col, other] >= threshold:
-                cluster.append(other)
-                visited.add(other)
-        clusters.append(cluster)
-        selected.append(cluster[0])
-        dropped.extend(cluster[1:])
-    return selected, clusters, dropped
-
 def downcast_df(df):
     float_cols = df.select_dtypes(include=['float'])
     int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
@@ -107,10 +86,8 @@ def downcast_df(df):
 
 # ==== GAME DAY OVERLAY MULTIPLIERS ====
 def overlay_multiplier(row):
-    # Start neutral
     multiplier = 1.0
-
-    # --- WEATHER OVERLAYS ---
+    # Weather overlays
     wind_col = 'wind_mph'
     wind_dir_col = 'wind_dir_string'
     if wind_col in row and wind_dir_col in row:
@@ -118,16 +95,14 @@ def overlay_multiplier(row):
         wind_dir = str(row[wind_dir_col]).lower()
         if pd.notnull(wind) and wind >= 10:
             if 'out' in wind_dir:
-                multiplier *= 1.08   # 8% boost for strong wind out
+                multiplier *= 1.08
             elif 'in' in wind_dir:
-                multiplier *= 0.93   # 7% reduction for strong wind in
-
+                multiplier *= 0.93
     temp_col = 'temp'
     if temp_col in row and pd.notnull(row[temp_col]):
         base_temp = 70
         delta = row[temp_col] - base_temp
-        multiplier *= 1.03 ** (delta / 10)  # ~3% per 10F above/below 70
-
+        multiplier *= 1.03 ** (delta / 10)
     humidity_col = 'humidity'
     if humidity_col in row and pd.notnull(row[humidity_col]):
         hum = row[humidity_col]
@@ -135,13 +110,10 @@ def overlay_multiplier(row):
             multiplier *= 1.02
         elif hum < 40:
             multiplier *= 0.98
-
-    # --- PARK FACTOR OVERLAY ---
     park_hr_col = 'park_hr_rate'
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.85, min(1.20, float(row[park_hr_col])))
         multiplier *= pf
-
     return multiplier
 
 # ==== UI ====
@@ -153,13 +125,11 @@ if event_file is not None and today_file is not None:
         event_df = safe_read(event_file)
         today_df = safe_read(today_file)
 
-        # 🔥 Deduplicate columns immediately after loading!
         event_df = dedup_columns(event_df)
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
 
-        # DEBUG: check for any remaining duplicate columns (should be none)
         dupes_event = find_duplicate_columns(event_df)
         if dupes_event:
             st.error(f"Duplicate columns in event file after deduplication: {set(dupes_event)}")
@@ -198,25 +168,15 @@ if event_file is not None and today_file is not None:
     st.write("Remaining columns today:")
     st.write(list(today_df.columns))
 
-    # === CLUSTER-BASED FEATURE SELECTION ===
-    st.write("Running cluster-based feature selection (removing highly correlated features)...")
+    # === NO CLUSTER FEATURE DROPPING! ===
+    st.write("🚨 Skipping cluster-correlation feature dropping — feeding all valid features to model.")
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-    X_for_cluster = event_df[feature_cols]
-    selected_features, clusters, cluster_dropped = cluster_select_features(X_for_cluster, threshold=0.95)
-    st.write(f"Feature clusters (threshold 0.95):")
-    for i, cluster in enumerate(clusters):
-        st.write(f"Cluster {i+1}: {cluster}")
-    st.write("Selected features from clusters:")
-    st.write(selected_features)
-    st.write("Dropped features from clusters:")
-    st.write(cluster_dropped)
 
-    # === FINAL PREP ===
-    X = clean_X(event_df[selected_features])
+    X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
-    X_today = clean_X(today_df[selected_features], train_cols=X.columns)
+    X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
@@ -246,40 +206,48 @@ if event_file is not None and today_file is not None:
 
     model_status = []
     models_for_ensemble = []
+    importances = {}
     try:
         xgb_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('xgb', xgb_clf))
         model_status.append('XGB OK')
+        importances['XGB'] = xgb_clf.feature_importances_
     except Exception as e:
         st.warning(f"XGBoost failed: {e}")
     try:
         lgb_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('lgb', lgb_clf))
         model_status.append('LGB OK')
+        importances['LGB'] = lgb_clf.feature_importances_
     except Exception as e:
         st.warning(f"LightGBM failed: {e}")
     try:
         cat_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('cat', cat_clf))
         model_status.append('CatBoost OK')
+        importances['CatBoost'] = cat_clf.feature_importances_
     except Exception as e:
         st.warning(f"CatBoost failed: {e}")
     try:
         rf_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('rf', rf_clf))
         model_status.append('RF OK')
+        importances['RF'] = rf_clf.feature_importances_
     except Exception as e:
         st.warning(f"RandomForest failed: {e}")
     try:
         gb_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('gb', gb_clf))
         model_status.append('GB OK')
+        importances['GB'] = gb_clf.feature_importances_
     except Exception as e:
         st.warning(f"GBM failed: {e}")
     try:
         lr_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('lr', lr_clf))
         model_status.append('LR OK')
+        # Logistic Regression doesn't have "feature_importances_", but we can get absolute coef
+        importances['LR'] = np.abs(lr_clf.coef_[0])
     except Exception as e:
         st.warning(f"LogReg failed: {e}")
 
@@ -291,6 +259,22 @@ if event_file is not None and today_file is not None:
     st.write("Fitting ensemble (soft voting)...")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
     ensemble.fit(X_train_scaled, y_train)
+
+    # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
+    st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
+    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
+    if tree_keys:
+        tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
+        import_df = pd.DataFrame({
+            "feature": X.columns,
+            "importance": tree_importances
+        }).sort_values("importance", ascending=False)
+        st.dataframe(import_df.head(30), use_container_width=True)
+        # Plot
+        fig, ax = plt.subplots(figsize=(7,5))
+        ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
+        ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
+        st.pyplot(fig)
 
     # =========== VALIDATION ===========
     st.write("Validating...")
