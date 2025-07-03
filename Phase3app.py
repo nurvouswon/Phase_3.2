@@ -171,7 +171,9 @@ if event_file is not None and today_file is not None:
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-
+    # Print/display final features used
+    st.markdown("### 📋 Final Features Used In Model")
+    st.code('\n'.join(feature_cols), language="python")
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
