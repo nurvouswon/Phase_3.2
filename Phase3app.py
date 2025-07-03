@@ -6,6 +6,7 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
+from sklearn.calibration import CalibratedClassifierCV
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
@@ -145,6 +146,13 @@ if event_file is not None and today_file is not None:
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
 
+    # ==== DEEP FEATURE ENGINEERING ====
+    for df in [today_df, event_df]:
+        if 'b_avg_exit_velo_7' in df.columns and 'park_hr_rate' in df.columns:
+            df['exitvelo7_x_parkhr'] = df['b_avg_exit_velo_7'] * df['park_hr_rate']
+        if 'b_barrel_rate_7' in df.columns and 'temp' in df.columns:
+            df['barrel7_x_temp'] = df['b_barrel_rate_7'] * df['temp']
+
     target_col = 'hr_outcome'
     if target_col not in event_df.columns:
         st.error("ERROR: No valid hr_outcome column found in event-level file.")
@@ -168,7 +176,6 @@ if event_file is not None and today_file is not None:
     st.write("Remaining columns today:")
     st.write(list(today_df.columns))
 
-    # === NO CLUSTER FEATURE DROPPING! ===
     st.write("🚨 Skipping cluster-correlation feature dropping — feeding all valid features to model.")
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
@@ -246,7 +253,6 @@ if event_file is not None and today_file is not None:
         lr_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('lr', lr_clf))
         model_status.append('LR OK')
-        # Logistic Regression doesn't have "feature_importances_", but we can get absolute coef
         importances['LR'] = np.abs(lr_clf.coef_[0])
     except Exception as e:
         st.warning(f"LogReg failed: {e}")
@@ -283,9 +289,14 @@ if event_file is not None and today_file is not None:
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
+    # =========== PROBABILITY CALIBRATION ===========
+    st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
+    calibrator = CalibratedClassifierCV(ensemble, method='isotonic', cv='prefit')
+    calibrator.fit(X_val_scaled, y_val)
+
     # =========== PREDICT ===========
-    st.write("Predicting HR probability for today...")
-    today_df['hr_probability'] = ensemble.predict_proba(X_today_scaled)[:,1]
+    st.write("Predicting HR probability for today (calibrated)...")
+    today_df['hr_probability'] = calibrator.predict_proba(X_today_scaled)[:,1]
 
     # ==== APPLY OVERLAY SCORING ====
     st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
@@ -295,18 +306,33 @@ if event_file is not None and today_file is not None:
     else:
         today_df['final_hr_probability'] = today_df['hr_probability']
 
-    # ==== SHOW LEADERBOARD WITH ALL COLUMNS ====
+    # ==== TOP 10 PRECISION LEADERBOARD ====
+    # Context/why columns for interpretability
+    context_cols = [
+        'b_rolling_hr_7', 'b_pa_per_hr_7', 'park_hr_pct_hand', 'temp', 'humidity',
+        'wind_mph', 'wind_dir_string', 'exitvelo7_x_parkhr', 'barrel7_x_temp'
+    ]
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
-    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True).head(30)
-    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
+    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"] \
+                        + [c for c in context_cols if c in today_df.columns]
+    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
+    # Optional: show only players likely to play (ex: n_priorpa_thisgame_player_at_bat >= 2)
+    if "n_priorpa_thisgame_player_at_bat" in leaderboard.columns:
+        leaderboard = leaderboard[leaderboard['n_priorpa_thisgame_player_at_bat'] >= 2]
+        leaderboard = leaderboard.reset_index(drop=True)
 
-    st.markdown("### 🏆 **Today's HR Probabilities & Overlay Multipliers — Top 30**")
-    st.dataframe(leaderboard, use_container_width=True)
+    # Calculate confidence gap between 10 and 11
+    if leaderboard.shape[0] > 10:
+        confidence_gap = leaderboard.iloc[9]['final_hr_probability'] - leaderboard.iloc[10]['final_hr_probability']
+        st.info(f"**Confidence gap between Top 10/11:** {confidence_gap:.4f}")
+    leaderboard_top10 = leaderboard.head(10)
+    leaderboard_top10["hr_probability"] = leaderboard_top10["hr_probability"].round(4)
+    leaderboard_top10["final_hr_probability"] = leaderboard_top10["final_hr_probability"].round(4)
+    leaderboard_top10["overlay_multiplier"] = leaderboard_top10["overlay_multiplier"].round(3)
+    st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
+    st.dataframe(leaderboard_top10, use_container_width=True)
     st.download_button("⬇️ Download Full Prediction CSV", data=today_df.to_csv(index=False), file_name="today_hr_predictions.csv")
 
 else:
