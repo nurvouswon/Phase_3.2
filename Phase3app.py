@@ -6,11 +6,11 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
-from sklearn.calibration import CalibratedClassifierCV
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 import matplotlib.pyplot as plt
+from sklearn.isotonic import IsotonicRegression
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -88,7 +88,6 @@ def downcast_df(df):
 # ==== GAME DAY OVERLAY MULTIPLIERS ====
 def overlay_multiplier(row):
     multiplier = 1.0
-    # Weather overlays
     wind_col = 'wind_mph'
     wind_dir_col = 'wind_dir_string'
     if wind_col in row and wind_dir_col in row:
@@ -145,13 +144,6 @@ if event_file is not None and today_file is not None:
 
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
-
-    # ==== DEEP FEATURE ENGINEERING ====
-    for df in [today_df, event_df]:
-        if 'b_avg_exit_velo_7' in df.columns and 'park_hr_rate' in df.columns:
-            df['exitvelo7_x_parkhr'] = df['b_avg_exit_velo_7'] * df['park_hr_rate']
-        if 'b_barrel_rate_7' in df.columns and 'temp' in df.columns:
-            df['barrel7_x_temp'] = df['b_barrel_rate_7'] * df['temp']
 
     target_col = 'hr_outcome'
     if target_col not in event_df.columns:
@@ -281,22 +273,72 @@ if event_file is not None and today_file is not None:
         ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
         ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
         st.pyplot(fig)
+    else:
+        st.warning("Tree model feature importances not available.")
 
-    # =========== VALIDATION ===========
-    st.write("Validating...")
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
-    auc = roc_auc_score(y_val, y_val_pred)
-    ll = log_loss(y_val, y_val_pred)
-    st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
-
-    # =========== PROBABILITY CALIBRATION ===========
-    st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
-    calibrator = CalibratedClassifierCV(ensemble, method='isotonic', cv='prefit')
-    calibrator.fit(X_val_scaled, y_val)
-
-    # =========== PREDICT ===========
-    st.write("Predicting HR probability for today (calibrated)...")
-    today_df['hr_probability'] = calibrator.predict_proba(X_today_scaled)[:,1]
+    # === FEATURE IMPORTANCE FILTERING & REDUCED ENSEMBLE ===
+    st.write("Selecting most important features based on mean tree importance (deep research filtering)...")
+    if tree_keys:
+        max_importance = import_df["importance"].max()
+        importance_threshold = max_importance * 0.05  # 5% of max importance, best-practice adaptive cutoff
+        keep_features = import_df[import_df["importance"] >= importance_threshold]["feature"].tolist()
+        st.info(f"Feature distillation: Keeping {len(keep_features)} of {len(X.columns)} features (threshold: {importance_threshold:.5f})")
+        X_reduced = X[keep_features]
+        X_today_reduced = X_today[keep_features]
+        X_train_r, X_val_r, y_train_r, y_val_r = train_test_split(
+            X_reduced, y, test_size=0.2, random_state=42, stratify=y
+        )
+        scaler_r = StandardScaler()
+        X_train_r_scaled = scaler_r.fit_transform(X_train_r)
+        X_val_r_scaled = scaler_r.transform(X_val_r)
+        X_today_r_scaled = scaler_r.transform(X_today_reduced)
+        # Refit ensemble
+        models_for_ensemble_r = []
+        try:
+            xgb_clf.fit(X_train_r_scaled, y_train_r)
+            models_for_ensemble_r.append(('xgb', xgb_clf))
+        except: pass
+        try:
+            lgb_clf.fit(X_train_r_scaled, y_train_r)
+            models_for_ensemble_r.append(('lgb', lgb_clf))
+        except: pass
+        try:
+            cat_clf.fit(X_train_r_scaled, y_train_r)
+            models_for_ensemble_r.append(('cat', cat_clf))
+        except: pass
+        try:
+            rf_clf.fit(X_train_r_scaled, y_train_r)
+            models_for_ensemble_r.append(('rf', rf_clf))
+        except: pass
+        try:
+            gb_clf.fit(X_train_r_scaled, y_train_r)
+            models_for_ensemble_r.append(('gb', gb_clf))
+        except: pass
+        try:
+            lr_clf.fit(X_train_r_scaled, y_train_r)
+            models_for_ensemble_r.append(('lr', lr_clf))
+        except: pass
+        st.write("Refitting distilled-feature ensemble...")
+        ensemble_r = VotingClassifier(estimators=models_for_ensemble_r, voting='soft', n_jobs=1)
+        ensemble_r.fit(X_train_r_scaled, y_train_r)
+        # Validation on reduced features
+        y_val_pred_r = ensemble_r.predict_proba(X_val_r_scaled)[:,1]
+        auc_r = roc_auc_score(y_val_r, y_val_pred_r)
+        ll_r = log_loss(y_val_r, y_val_pred_r)
+        st.success(f"Reduced-features Validation AUC: **{auc_r:.4f}** — LogLoss: **{ll_r:.4f}**")
+        # CALIBRATION (deep research: isotonic regression)
+        st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
+        ir = IsotonicRegression(out_of_bounds="clip")
+        y_val_pred_r_cal = ir.fit_transform(y_val_pred_r, y_val_r)
+        # Predict on today
+        st.write("Predicting HR probability for today (calibrated)...")
+        y_today_pred = ensemble_r.predict_proba(X_today_r_scaled)[:,1]
+        y_today_pred_cal = ir.transform(y_today_pred)
+        today_df['hr_probability'] = y_today_pred_cal
+    else:
+        # Fallback if no tree model importances available
+        st.warning("No feature filtering performed; using all features.")
+        today_df['hr_probability'] = ensemble.predict_proba(X_today_scaled)[:,1]
 
     # ==== APPLY OVERLAY SCORING ====
     st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
@@ -306,34 +348,39 @@ if event_file is not None and today_file is not None:
     else:
         today_df['final_hr_probability'] = today_df['hr_probability']
 
-    # ==== TOP 10 PRECISION LEADERBOARD ====
-    # Context/why columns for interpretability
-    context_cols = [
-        'b_rolling_hr_7', 'b_pa_per_hr_7', 'park_hr_pct_hand', 'temp', 'humidity',
-        'wind_mph', 'wind_dir_string', 'exitvelo7_x_parkhr', 'barrel7_x_temp'
-    ]
+    # ==== TOP 10 PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"] \
-                        + [c for c in context_cols if c in today_df.columns]
+    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
     leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
-    # Optional: show only players likely to play (ex: n_priorpa_thisgame_player_at_bat >= 2)
-    if "n_priorpa_thisgame_player_at_bat" in leaderboard.columns:
-        leaderboard = leaderboard[leaderboard['n_priorpa_thisgame_player_at_bat'] >= 2]
-        leaderboard = leaderboard.reset_index(drop=True)
+    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
+    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
-    # Calculate confidence gap between 10 and 11
-    if leaderboard.shape[0] > 10:
-        confidence_gap = leaderboard.iloc[9]['final_hr_probability'] - leaderboard.iloc[10]['final_hr_probability']
-        st.info(f"**Confidence gap between Top 10/11:** {confidence_gap:.4f}")
-    leaderboard_top10 = leaderboard.head(10)
-    leaderboard_top10["hr_probability"] = leaderboard_top10["hr_probability"].round(4)
-    leaderboard_top10["final_hr_probability"] = leaderboard_top10["final_hr_probability"].round(4)
-    leaderboard_top10["overlay_multiplier"] = leaderboard_top10["overlay_multiplier"].round(3)
+    # Top 10 + precision/confidence gap display
     st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
+    leaderboard_top10 = leaderboard.head(10)
     st.dataframe(leaderboard_top10, use_container_width=True)
-    st.download_button("⬇️ Download Full Prediction CSV", data=today_df.to_csv(index=False), file_name="today_hr_predictions.csv")
+
+    # Confidence gap: drop-off between #10 and #11
+    if len(leaderboard) > 10:
+        gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard.loc[10, "final_hr_probability"]
+        st.markdown(f"**Confidence gap between Top 10/11:** `{gap:.4f}`")
+    else:
+        st.markdown("**Confidence gap:** (less than 11 players in leaderboard)")
+
+    # Download full leaderboard and prediction CSVs
+    st.download_button(
+        "⬇️ Download Full Prediction CSV",
+        data=today_df.to_csv(index=False),
+        file_name="today_hr_predictions.csv"
+    )
+    st.download_button(
+        "⬇️ Download Top 10 Leaderboard CSV",
+        data=leaderboard_top10.to_csv(index=False),
+        file_name="top10_leaderboard.csv"
+    )
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
