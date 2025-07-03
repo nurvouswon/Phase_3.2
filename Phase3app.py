@@ -90,42 +90,6 @@ park_hr_percent_map_all = {
     'PHI': 1.18, 'PIT': 0.83, 'SD': 1.02, 'SEA': 1.00, 'SF': 0.75, 'STL': 0.86, 'TB': 0.96, 'TEX': 1.07, 'TOR': 1.09,
     'WAS': 1.00, 'WSH': 1.00
 }
-park_hr_percent_map_rhb = {
-    'ARI': 1.00, 'AZ': 1.00, 'ATL': 0.93, 'BAL': 1.09, 'BOS': 0.90, 'CHC': 1.09, 'CHW': 1.26, 'CWS': 1.26,
-    'CIN': 1.27, 'CLE': 0.91, 'COL': 1.05, 'DET': 0.96, 'HOU': 1.10, 'KC': 0.83, 'LAA': 1.01, 'LAD': 1.11,
-    'MIA': 0.84, 'MIL': 1.12, 'MIN': 0.95, 'NYM': 1.11, 'NYY': 1.15, 'OAK': 0.91, 'ATH': 0.91,
-    'PHI': 1.18, 'PIT': 0.80, 'SD': 1.02, 'SEA': 1.03, 'SF': 0.76, 'STL': 0.84, 'TB': 0.94, 'TEX': 1.06, 'TOR': 1.11,
-    'WAS': 1.02, 'WSH': 1.02
-}
-park_hr_percent_map_lhb = {
-    'ARI': 0.98, 'AZ': 0.98, 'ATL': 0.99, 'BAL': 1.13, 'BOS': 0.75, 'CHC': 0.93, 'CHW': 1.23, 'CWS': 1.23,
-    'CIN': 1.29, 'CLE': 1.01, 'COL': 1.07, 'DET': 0.96, 'HOU': 1.09, 'KC': 0.81, 'LAA': 1.00, 'LAD': 1.12,
-    'MIA': 0.87, 'MIL': 1.19, 'MIN': 0.91, 'NYM': 1.06, 'NYY': 1.28, 'OAK': 0.87, 'ATH': 0.87,
-    'PHI': 1.19, 'PIT': 0.90, 'SD': 0.98, 'SEA': 0.96, 'SF': 0.73, 'STL': 0.90, 'TB': 0.99, 'TEX': 1.11, 'TOR': 1.05,
-    'WAS': 0.96, 'WSH': 0.96
-}
-# ========== DEEP RESEARCH HR MULTIPLIERS: PITCHER SIDE ===============
-park_hr_percent_map_pitcher_all = {
-    'ARI': 0.98, 'AZ': 0.98, 'ATL': 0.95, 'BAL': 1.11, 'BOS': 0.84, 'CHC': 1.03, 'CHW': 1.25, 'CWS': 1.25,
-    'CIN': 1.27, 'CLE': 0.96, 'COL': 1.06, 'DET': 0.96, 'HOU': 1.10, 'KC': 0.83, 'LAA': 1.01, 'LAD': 1.11,
-    'MIA': 0.85, 'MIL': 1.14, 'MIN': 0.94, 'NYM': 1.07, 'NYY': 1.20, 'OAK': 0.90, 'ATH': 0.90,
-    'PHI': 1.18, 'PIT': 0.83, 'SD': 1.02, 'SEA': 1.00, 'SF': 0.75, 'STL': 0.86, 'TB': 0.96, 'TEX': 1.07, 'TOR': 1.09,
-    'WAS': 1.00, 'WSH': 1.00
-}
-park_hr_percent_map_rhp = {
-    'ARI': 0.97, 'AZ': 0.97, 'ATL': 1.01, 'BAL': 1.16, 'BOS': 0.84, 'CHC': 1.02, 'CHW': 1.28, 'CWS': 1.28,
-    'CIN': 1.27, 'CLE': 0.98, 'COL': 1.06, 'DET': 0.95, 'HOU': 1.11, 'KC': 0.84, 'LAA': 1.01, 'LAD': 1.11,
-    'MIA': 0.84, 'MIL': 1.14, 'MIN': 0.96, 'NYM': 1.07, 'NYY': 1.24, 'OAK': 0.90, 'ATH': 0.90,
-    'PHI': 1.19, 'PIT': 0.85, 'SD': 1.02, 'SEA': 1.01, 'SF': 0.73, 'STL': 0.84, 'TB': 0.97, 'TEX': 1.10, 'TOR': 1.11,
-    'WAS': 1.03, 'WSH': 1.03
-}
-park_hr_percent_map_lhp = {
-    'ARI': 0.99, 'AZ': 0.99, 'ATL': 0.79, 'BAL': 0.97, 'BOS': 0.83, 'CHC': 1.03, 'CHW': 1.18, 'CWS': 1.18,
-    'CIN': 1.27, 'CLE': 0.89, 'COL': 1.05, 'DET': 0.97, 'HOU': 1.07, 'KC': 0.79, 'LAA': 1.01, 'LAD': 1.11,
-    'MIA': 0.90, 'MIL': 1.14, 'MIN': 0.89, 'NYM': 1.05, 'NYY': 1.12, 'OAK': 0.89, 'ATH': 0.89,
-    'PHI': 1.16, 'PIT': 0.78, 'SD': 1.02, 'SEA': 0.97, 'SF': 0.82, 'STL': 0.96, 'TB': 0.94, 'TEX': 1.01, 'TOR': 1.06,
-    'WAS': 0.90, 'WSH': 0.90
-}
 
 # ==== FILE HELPERS ====
 def safe_read(path):
@@ -517,9 +481,23 @@ if event_file is not None and today_file is not None:
     st.markdown("### 🏆 **Today's HR Probabilities & Overlay Multipliers — Top 15**")
     st.dataframe(leaderboard, use_container_width=True)
     st.download_button("⬇️ Download Full Prediction CSV", data=today_df.to_csv(index=False), file_name="today_hr_predictions.csv")
-
-    # Optionally: download overlay details only
     st.download_button("⬇️ Download Overlay Factors CSV", data=leaderboard.to_csv(index=False), file_name="today_overlay_factors.csv")
+
+    # ==== SHOW ADVANCED DIAGNOSTICS: Top 5 Overlay Scoring Breakdown ====
+    N_DIAG = 5  # Change to see more or fewer players
+
+    st.markdown(f"### 🔬 Overlay Diagnostics — Top {N_DIAG} Players")
+    diag_cols = ["player_name", "hr_probability", "overlay_multiplier", "final_hr_probability", "overlay_notes"]
+    top_diag = leaderboard.head(N_DIAG).copy()
+    st.dataframe(top_diag[diag_cols], use_container_width=True)
+
+    # Expanders for detailed notes for each player
+    for idx, row in top_diag.iterrows():
+        with st.expander(f"Scoring breakdown for {row['player_name']}"):
+            st.markdown(f"**Raw HR Probability:** {row['hr_probability']:.4f}")
+            st.markdown(f"**Overlay Multiplier:** {row['overlay_multiplier']:.3f}")
+            st.markdown(f"**Final HR Probability:** {row['final_hr_probability']:.4f}")
+            st.markdown(f"**Overlay Notes:** {row['overlay_notes']}")
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
