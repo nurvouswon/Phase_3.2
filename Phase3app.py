@@ -13,8 +13,8 @@ import catboost as cb
 import matplotlib.pyplot as plt
 from sklearn.calibration import calibration_curve
 
-st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
-st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
+st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather, Power, Platoon Overlays", layout="wide")
+st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather, Power, Platoon Overlays [2025 DEEP RESEARCH]")
 
 # ==== FILE HELPERS ====
 def safe_read(path):
@@ -48,7 +48,7 @@ def fix_types(df):
 def clean_X(df, train_cols=None):
     df = dedup_columns(df)
     df = fix_types(df)
-    allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status'}
+    allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status', 'batting_order'}
     drop_cols = [c for c in df.select_dtypes('O').columns if c not in allowed_obj]
     df = df.drop(columns=drop_cols, errors='ignore')
     df = df.fillna(-1)
@@ -60,7 +60,7 @@ def clean_X(df, train_cols=None):
     return df
 
 def get_valid_feature_cols(df, drop=None):
-    base_drop = set(['game_date','batter_id','player_name','pitcher_id','city','park','roof_status'])
+    base_drop = set(['game_date','batter_id','player_name','pitcher_id','city','park','roof_status','batting_order'])
     if drop: base_drop = base_drop.union(drop)
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
@@ -106,44 +106,117 @@ def downcast_df(df):
         df[col] = pd.to_numeric(df[col], downcast='integer')
     return df
 
-# ==== GAME DAY OVERLAY MULTIPLIERS (CAPPED) ====
-def overlay_multiplier(row):
+# ==== OVERLAY: DEEP RESEARCH SCORING LOGIC ====
+def overlay_multiplier(row, detailed=False):
+    """
+    Ultra-robust overlay: weather, park, SZN power, hot streak, platoon, lineup, capping.
+    Shows all notes if detailed=True.
+    """
     multiplier = 1.0
-    # Wind
-    wind_col = 'wind_mph'
-    wind_dir_col = 'wind_dir_string'
-    if wind_col in row and wind_dir_col in row:
-        wind = row[wind_col]
-        wind_dir = str(row[wind_dir_col]).lower()
-        if pd.notnull(wind) and wind >= 10:
-            if 'out' in wind_dir:
-                multiplier *= 1.08
-            elif 'in' in wind_dir:
-                multiplier *= 0.93
-    # Temp
-    temp_col = 'temp'
-    if temp_col in row and pd.notnull(row[temp_col]):
-        base_temp = 70
-        delta = row[temp_col] - base_temp
-        multiplier *= 1.03 ** (delta / 10)
+    notes = []
+
+    # Wind (game day only)
+    wind = row.get("wind_mph", None)
+    wind_dir = str(row.get("wind_dir_string", "")).lower()
+    if pd.notnull(wind) and wind >= 10:
+        if "out" in wind_dir:
+            multiplier *= 1.08
+            notes.append("Wind Out +8%")
+        elif "in" in wind_dir:
+            multiplier *= 0.93
+            notes.append("Wind In -7%")
+
+    # Temperature
+    temp = row.get("temp", None)
+    if pd.notnull(temp):
+        delta = temp - 70
+        temp_mult = 1.03 ** (delta / 10)
+        multiplier *= temp_mult
+        if abs(delta) >= 5:
+            notes.append(f"Temp Adj {temp_mult:.2f}x")
+
     # Humidity
-    humidity_col = 'humidity'
-    if humidity_col in row and pd.notnull(row[humidity_col]):
-        hum = row[humidity_col]
+    hum = row.get("humidity", None)
+    if pd.notnull(hum):
         if hum > 60:
             multiplier *= 1.02
+            notes.append("High Humidity +2%")
         elif hum < 40:
             multiplier *= 0.98
-    # Park
-    park_hr_col = 'park_hr_rate'
-    if park_hr_col in row and pd.notnull(row[park_hr_col]):
-        pf = max(0.85, min(1.20, float(row[park_hr_col])))
+            notes.append("Low Humidity -2%")
+
+    # Park HR Factor
+    pf = row.get("park_hr_rate", 1.0)
+    if pd.notnull(pf):
+        pf = max(0.85, min(1.20, float(pf)))
         multiplier *= pf
-    # ==== HARD CAP ====
-    overlay_cap = 1.15
+        if pf != 1.0:
+            notes.append(f"Park {pf:.2f}x")
+
+    # Season-to-date Power: use best available power column (e.g. barrel, HR, hard hit)
+    power_cols = [c for c in row.index if ("barrel_rate_60" in c or "hr_rate_60" in c or "hard_hit_rate_60" in c)]
+    power_boost = 1.0
+    if power_cols:
+        base_val = np.nanmean([row[c] for c in power_cols if pd.notnull(row[c])])
+        if not np.isnan(base_val) and base_val > 0.12:  # above MLB average
+            power_boost = 1.07 + 0.07 * (base_val - 0.12) / 0.08
+            power_boost = min(power_boost, 1.18)
+            multiplier *= power_boost
+            notes.append(f"SZN Power {power_boost:.2f}x")
+    # Momentum / hot streak (b_barrel_rate_7, b_hr_rate_7, b_hard_hit_rate_7, etc)
+    moment_cols = [c for c in row.index if ("barrel_rate_7" in c or "hr_rate_7" in c or "hard_hit_rate_7" in c)]
+    moment_boost = 1.0
+    if moment_cols:
+        hot_val = np.nanmean([row[c] for c in moment_cols if pd.notnull(row[c])])
+        if not np.isnan(hot_val) and hot_val > 0.18:
+            moment_boost = 1.08 + 0.10 * (hot_val - 0.18) / 0.08
+            moment_boost = min(moment_boost, 1.22)
+            multiplier *= moment_boost
+            notes.append(f"Hot Streak {moment_boost:.2f}x")
+
+    # Platoon advantage
+    bat_hand = str(row.get("batter_hand", "")).upper()
+    pit_hand = str(row.get("pitcher_hand", "")).upper()
+    platoon_mult = 1.0
+    if bat_hand in ("L", "R") and pit_hand in ("L", "R"):
+        if (bat_hand == "L" and pit_hand == "R") or (bat_hand == "R" and pit_hand == "L"):
+            platoon_mult = 1.08
+            multiplier *= platoon_mult
+            notes.append("Platoon Adv +8%")
+        else:
+            platoon_mult = 0.97
+            multiplier *= platoon_mult
+            notes.append("No Platoon -3%")
+
+    # Lineup order effect (if available)
+    order = row.get("batting_order", None)
+    if pd.notnull(order) and isinstance(order, (int, float)):
+        try:
+            if order <= 3:
+                order_mult = 1.10
+                multiplier *= order_mult
+                notes.append("Top Order +10%")
+            elif order <= 6:
+                order_mult = 1.04
+                multiplier *= order_mult
+                notes.append("Middle Order +4%")
+            elif order >= 8:
+                order_mult = 0.93
+                multiplier *= order_mult
+                notes.append("Bottom Order -7%")
+        except Exception:
+            pass
+
+    # Capping/flooring for sanity
+    overlay_cap = 1.22
     overlay_floor = 0.85
     multiplier = min(max(multiplier, overlay_floor), overlay_cap)
-    return multiplier
+    notes.append(f"Capped/Floored ({overlay_floor:.2f}-{overlay_cap:.2f})")
+
+    if detailed:
+        return multiplier, notes
+    else:
+        return multiplier
 
 # ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
@@ -297,7 +370,6 @@ if event_file is not None and today_file is not None:
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
-    # Optional: calibration curve
     with st.expander("Show Calibration Curve (Validation Set)"):
         fraction_of_positives, mean_predicted_value = calibration_curve(y_val, y_val_pred, n_bins=20)
         fig, ax = plt.subplots(figsize=(6,6))
@@ -313,19 +385,19 @@ if event_file is not None and today_file is not None:
     st.write("Predicting HR probability for today...")
     today_df['hr_probability'] = calibrated_ensemble.predict_proba(X_today_scaled)[:,1]
 
-    # ==== APPLY OVERLAY SCORING ====
-    st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
-    if 'hr_probability' in today_df.columns:
-        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
-    else:
-        today_df['final_hr_probability'] = today_df['hr_probability']
+    # ==== APPLY ADVANCED OVERLAY SCORING ====
+    st.write("Applying post-prediction overlay (weather, park, power, platoon, order, streaks)...")
+    overlays = today_df.apply(lambda row: overlay_multiplier(row, detailed=True), axis=1, result_type="expand")
+    today_df['overlay_multiplier'] = overlays[0]
+    today_df['overlay_notes'] = overlays[1].apply(lambda l: " | ".join(l) if isinstance(l, list) else "")
 
-    # ==== SHOW CONDENSED LEADERBOARD TOP 15 ====
+    today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+
+    # ==== SHOW LEADERBOARD TOP 15 (with overlay factors) ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
+    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability", "overlay_notes"]
     leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True).head(15)
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
@@ -334,6 +406,9 @@ if event_file is not None and today_file is not None:
     st.markdown("### 🏆 **Today's HR Probabilities & Overlay Multipliers — Top 15**")
     st.dataframe(leaderboard, use_container_width=True)
     st.download_button("⬇️ Download Full Prediction CSV", data=today_df.to_csv(index=False), file_name="today_hr_predictions.csv")
+
+    # Optionally: download overlay details only
+    st.download_button("⬇️ Download Overlay Factors CSV", data=leaderboard.to_csv(index=False), file_name="today_overlay_factors.csv")
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
