@@ -64,7 +64,7 @@ def get_valid_feature_cols(df, drop=None):
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
 
-def drop_high_na_low_var(df, thresh_na=0.25, thresh_var=1e-7):
+def drop_high_na_low_var(df, thresh_na=0.4, thresh_var=1e-9):
     cols_to_drop = []
     na_frac = df.isnull().mean()
     low_var_cols = df.select_dtypes(include=[np.number]).columns[df.select_dtypes(include=[np.number]).std() < thresh_var]
