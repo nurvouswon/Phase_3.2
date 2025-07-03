@@ -156,13 +156,6 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    st.write("Dropping columns with >50% missing or near-zero variance...")
-    event_df, event_dropped = drop_high_na_low_var(event_df, thresh_na=0.5, thresh_var=1e-9)
-    today_df, today_dropped = drop_high_na_low_var(today_df, thresh_na=0.5, thresh_var=1e-9)
-    st.write("Dropped columns from event-level data:")
-    st.write(event_dropped)
-    st.write("Dropped columns from today data:")
-    st.write(today_dropped)
     st.write("Remaining columns event-level:")
     st.write(list(event_df.columns))
     st.write("Remaining columns today:")
