@@ -155,7 +155,8 @@ if event_file is not None and today_file is not None:
     value_counts.columns = [target_col, 'count']
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
-
+    event_df, event_dropped = drop_high_na_low_var(event_df, thresh_na=1.0, thresh_var=0.0)
+    today_df, today_dropped = drop_high_na_low_var(today_df, thresh_na=1.0, thresh_var=0.0)
     st.write("Remaining columns event-level:")
     st.write(list(event_df.columns))
     st.write("Remaining columns today:")
