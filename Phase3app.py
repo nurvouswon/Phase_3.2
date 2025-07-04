@@ -191,10 +191,29 @@ if event_file is not None and today_file is not None:
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
-    # Show stats for the three players
-    st.write("Addison Barger:", X_today[today_df['player_name'] == 'Addison Barger'])
-    st.write("George Springer:", X_today[today_df['player_name'] == 'George Springer'])
-    st.write("Jake McCarthy:", X_today[today_df['player_name'] == 'Jake McCarthy'])
+    # --- BEGIN: DEBUG PRINT CLEANED AND SCALED FEATURE VECTORS ---
+    players = ['Addison Barger', 'George Springer', 'Jake McCarthy']
+
+    st.markdown("## 🔬 Model Input Debug: Cleaned Features")
+    for name in players:
+        mask = today_df["player_name"] == name
+        st.write(f"Player: {name}")
+        if mask.sum() == 0:
+            st.warning(f"{name} not found in today's dataframe!")
+        else:
+            st.dataframe(X_today[mask])
+
+    st.markdown("## 🧪 Model Input Debug: Scaled Feature Vectors (input to model)")
+    for name in players:
+        mask = today_df["player_name"] == name
+        idxs = np.where(mask)[0]
+        st.write(f"Player: {name}")
+        if len(idxs) == 0:
+            st.warning(f"{name} not found in today's dataframe!")
+        else:
+            scaled_row = pd.DataFrame(X_today_scaled[idxs], columns=X_today.columns, index=[name])
+            st.dataframe(scaled_row)
+    # --- END DEBUG BLOCK ---
     # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
