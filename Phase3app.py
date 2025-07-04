@@ -10,6 +10,7 @@ import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 import matplotlib.pyplot as plt
+from sklearn.isotonic import IsotonicRegression
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -63,7 +64,7 @@ def get_valid_feature_cols(df, drop=None):
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
 
-def drop_high_na_low_var(df, thresh_na=0.25, thresh_var=1e-7):
+def drop_high_na_low_var(df, thresh_na=1.0, thresh_var=0.0):
     cols_to_drop = []
     na_frac = df.isnull().mean()
     low_var_cols = df.select_dtypes(include=[np.number]).columns[df.select_dtypes(include=[np.number]).std() < thresh_var]
@@ -87,7 +88,6 @@ def downcast_df(df):
 # ==== GAME DAY OVERLAY MULTIPLIERS ====
 def overlay_multiplier(row):
     multiplier = 1.0
-    # Weather overlays
     wind_col = 'wind_mph'
     wind_dir_col = 'wind_dir_string'
     if wind_col in row and wind_dir_col in row:
@@ -124,7 +124,9 @@ if event_file is not None and today_file is not None:
     with st.spinner("Loading and prepping files (1-2 min, be patient)..."):
         event_df = safe_read(event_file)
         today_df = safe_read(today_file)
-
+        # Drop columns that are all NaN in event or today df
+        event_df = event_df.dropna(axis=1, how='all')
+        today_df = today_df.dropna(axis=1, how='all')
         event_df = dedup_columns(event_df)
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
@@ -156,24 +158,22 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    st.write("Dropping columns with >25% missing or near-zero variance...")
-    event_df, event_dropped = drop_high_na_low_var(event_df, thresh_na=0.25, thresh_var=1e-7)
-    today_df, today_dropped = drop_high_na_low_var(today_df, thresh_na=0.25, thresh_var=1e-7)
-    st.write("Dropped columns from event-level data:")
-    st.write(event_dropped)
-    st.write("Dropped columns from today data:")
-    st.write(today_dropped)
+    # Only drop columns that are all NaN (no filtering on missing or variance)
+    event_df, _ = drop_high_na_low_var(event_df, thresh_na=1.0, thresh_var=0.0)
+    today_df, _ = drop_high_na_low_var(today_df, thresh_na=1.0, thresh_var=0.0)
+
     st.write("Remaining columns event-level:")
     st.write(list(event_df.columns))
     st.write("Remaining columns today:")
     st.write(list(today_df.columns))
 
-    # === NO CLUSTER FEATURE DROPPING! ===
     st.write("🚨 Skipping cluster-correlation feature dropping — feeding all valid features to model.")
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-
+    # Print/display final features used
+    st.markdown("### 📋 Final Features Used In Model")
+    st.code('\n'.join(feature_cols), language="python")
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
@@ -246,7 +246,6 @@ if event_file is not None and today_file is not None:
         lr_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('lr', lr_clf))
         model_status.append('LR OK')
-        # Logistic Regression doesn't have "feature_importances_", but we can get absolute coef
         importances['LR'] = np.abs(lr_clf.coef_[0])
     except Exception as e:
         st.warning(f"LogReg failed: {e}")
@@ -275,6 +274,8 @@ if event_file is not None and today_file is not None:
         ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
         ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
         st.pyplot(fig)
+    else:
+        st.warning("Tree model feature importances not available.")
 
     # =========== VALIDATION ===========
     st.write("Validating...")
@@ -283,9 +284,14 @@ if event_file is not None and today_file is not None:
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
-    # =========== PREDICT ===========
-    st.write("Predicting HR probability for today...")
-    today_df['hr_probability'] = ensemble.predict_proba(X_today_scaled)[:,1]
+    # =========== PREDICT (WITH ISOTONIC CALIBRATION) ===========
+    st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
+    ir = IsotonicRegression(out_of_bounds="clip")
+    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+    st.write("Predicting HR probability for today (calibrated)...")
+    y_today_pred = ensemble.predict_proba(X_today_scaled)[:,1]
+    y_today_pred_cal = ir.transform(y_today_pred)
+    today_df['hr_probability'] = y_today_pred_cal
 
     # ==== APPLY OVERLAY SCORING ====
     st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
@@ -295,19 +301,39 @@ if event_file is not None and today_file is not None:
     else:
         today_df['final_hr_probability'] = today_df['hr_probability']
 
-    # ==== SHOW LEADERBOARD WITH ALL COLUMNS ====
+    # ==== TOP 10 PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
     leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
-    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True).head(30)
+    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
-    st.markdown("### 🏆 **Today's HR Probabilities & Overlay Multipliers — Top 30**")
-    st.dataframe(leaderboard, use_container_width=True)
-    st.download_button("⬇️ Download Full Prediction CSV", data=today_df.to_csv(index=False), file_name="today_hr_predictions.csv")
+    # Top 10 + precision/confidence gap display
+    st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
+    leaderboard_top10 = leaderboard.head(10)
+    st.dataframe(leaderboard_top10, use_container_width=True)
+
+    # Confidence gap: drop-off between #10 and #11
+    if len(leaderboard) > 10:
+        gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard.loc[10, "final_hr_probability"]
+        st.markdown(f"**Confidence gap between Top 10/11:** `{gap:.4f}`")
+    else:
+        st.markdown("**Confidence gap:** (less than 11 players in leaderboard)")
+
+    # Download full leaderboard and prediction CSVs
+    st.download_button(
+        "⬇️ Download Full Prediction CSV",
+        data=today_df.to_csv(index=False),
+        file_name="today_hr_predictions.csv"
+    )
+    st.download_button(
+        "⬇️ Download Top 10 Leaderboard CSV",
+        data=leaderboard_top10.to_csv(index=False),
+        file_name="top10_leaderboard.csv"
+    )
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
