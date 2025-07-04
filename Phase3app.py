@@ -13,7 +13,11 @@ import matplotlib.pyplot as plt
 from sklearn.isotonic import IsotonicRegression
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
-st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
+
+tab1, tab2 = st.tabs([
+    "⚾ Predict Today's Home Runs (App 3)", 
+    "🔎 Backtest / Validate — Daily HR Hit Rate"
+])
 
 # ==== FILE HELPERS ====
 def safe_read(path):
@@ -75,7 +79,7 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Forces to float, ensures np.isinf works
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
@@ -115,8 +119,6 @@ def overlay_multiplier(row):
 
 # ==== FEATURE ENGINEERING BLOCK ====
 def feature_engineering(df):
-    # ====== DELTA/DIFFERENCE FEATURES ======
-    # List of rolling windows (edit as needed)
     windows_short = [3, 5, 7]
     windows_long = [14, 20, 30, 60]
     stat_bases = [
@@ -130,22 +132,11 @@ def feature_engineering(df):
                 col_long = f"{stat}_{w_l}"
                 if col_short in df.columns and col_long in df.columns:
                     df[f"delta_{stat}_{w_s}_{w_l}"] = df[col_short] - df[col_long]
-    # ====== HOT STREAK FLAGS ======
-    for stat in stat_bases:
-        for w_s in windows_short:
-            for w_l in windows_long:
-                col_short = f"{stat}_{w_s}"
-                col_long = f"{stat}_{w_l}"
-                if col_short in df.columns and col_long in df.columns:
                     df[f"is_hot_{stat}_{w_s}_{w_l}"] = (df[col_short] > df[col_long]).astype(int)
-    # ====== INTERACTION FEATURES ======
-    # Example: barrel rate matchup, HR/PA matchup, etc.
     for bstat in ['b_hr_per_pa_3', 'b_barrel_rate_3', 'b_slg_3', 'b_avg_exit_velo_3']:
         for pstat in ['p_hr_per_pa_3', 'p_barrel_rate_3', 'p_slg_3', 'p_avg_exit_velo_3']:
             if bstat in df.columns and pstat in df.columns:
                 df[f"{bstat}_X_{pstat}"] = df[bstat] * df[pstat]
-    # ====== OUTLIER CLIPPING ======
-    # Clip the key columns to sensible MLB ranges for safety
     for col in df.columns:
         if 'hr_per_pa' in col:
             df[col] = df[col].clip(0, 0.25)
@@ -155,199 +146,204 @@ def feature_engineering(df):
             df[col] = df[col].clip(0, 1)
     return df
 
-# ==== UI ====
-event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
-today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
+# ========== TAB 1: MAIN PREDICTION ==========
+with tab1:
+    st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
 
-if event_file is not None and today_file is not None:
-    with st.spinner("Loading and prepping files (1-2 min, be patient)..."):
-        event_df = safe_read(event_file)
-        today_df = safe_read(today_file)
-        # Drop columns that are all NaN in either df
-        event_df = event_df.dropna(axis=1, how='all')
-        today_df = today_df.dropna(axis=1, how='all')
-        event_df = dedup_columns(event_df)
-        today_df = dedup_columns(today_df)
-        event_df = event_df.reset_index(drop=True)
-        today_df = today_df.reset_index(drop=True)
-        dupes_event = find_duplicate_columns(event_df)
-        if dupes_event:
-            st.error(f"Duplicate columns in event file after deduplication: {set(dupes_event)}")
+    event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
+    today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
+
+    if event_file is not None and today_file is not None:
+        with st.spinner("Loading and prepping files (1-2 min, be patient)..."):
+            event_df = safe_read(event_file)
+            today_df = safe_read(today_file)
+            event_df = event_df.dropna(axis=1, how='all')
+            today_df = today_df.dropna(axis=1, how='all')
+            event_df = dedup_columns(event_df)
+            today_df = dedup_columns(today_df)
+            event_df = event_df.reset_index(drop=True)
+            today_df = today_df.reset_index(drop=True)
+            dupes_event = find_duplicate_columns(event_df)
+            if dupes_event:
+                st.error(f"Duplicate columns in event file after deduplication: {set(dupes_event)}")
+                st.stop()
+            dupes_today = find_duplicate_columns(today_df)
+            if dupes_today:
+                st.error(f"Duplicate columns in today file after deduplication: {set(dupes_today)}")
+                st.stop()
+            event_df = fix_types(event_df)
+            today_df = fix_types(today_df)
+
+        target_col = 'hr_outcome'
+        if target_col not in event_df.columns:
+            st.error("ERROR: No valid hr_outcome column found in event-level file.")
             st.stop()
-        dupes_today = find_duplicate_columns(today_df)
-        if dupes_today:
-            st.error(f"Duplicate columns in today file after deduplication: {set(dupes_today)}")
+        st.success("✅ 'hr_outcome' column found in event-level data.")
+
+        value_counts = event_df[target_col].value_counts(dropna=False).reset_index()
+        value_counts.columns = [target_col, 'count']
+        st.write("Value counts for hr_outcome:")
+        st.dataframe(value_counts)
+
+        # ===== APPLY FEATURE ENGINEERING (deep research block) =====
+        event_df = feature_engineering(event_df)
+        today_df = feature_engineering(today_df)
+        feat_cols_train = set(get_valid_feature_cols(event_df))
+        feat_cols_today = set(get_valid_feature_cols(today_df))
+        feature_cols = sorted(list(feat_cols_train & feat_cols_today))
+
+        st.write(f"Number of features in both event/today: {len(feature_cols)}")
+        st.write(f"Features being used: {feature_cols}")
+
+        X = clean_X(event_df[feature_cols])
+        y = event_df[target_col]
+        X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
+        X = downcast_df(X)
+        X_today = downcast_df(X_today)
+
+        nan_inf_check(X, "X features")
+        nan_inf_check(X_today, "X_today features")
+
+        st.write("Splitting for validation and scaling...")
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_val_scaled = scaler.transform(X_val)
+        X_today_scaled = scaler.transform(X_today)
+
+        st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
+        xgb_clf = xgb.XGBClassifier(
+            n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
+            n_jobs=1, verbosity=1, tree_method='hist'
+        )
+        lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
+        cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
+        rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
+        gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
+        lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+
+        model_status = []
+        models_for_ensemble = []
+        importances = {}
+        try:
+            xgb_clf.fit(X_train_scaled, y_train)
+            models_for_ensemble.append(('xgb', xgb_clf))
+            model_status.append('XGB OK')
+            importances['XGB'] = xgb_clf.feature_importances_
+        except Exception as e:
+            st.warning(f"XGBoost failed: {e}")
+        try:
+            lgb_clf.fit(X_train_scaled, y_train)
+            models_for_ensemble.append(('lgb', lgb_clf))
+            model_status.append('LGB OK')
+            importances['LGB'] = lgb_clf.feature_importances_
+        except Exception as e:
+            st.warning(f"LightGBM failed: {e}")
+        try:
+            cat_clf.fit(X_train_scaled, y_train)
+            models_for_ensemble.append(('cat', cat_clf))
+            model_status.append('CatBoost OK')
+            importances['CatBoost'] = cat_clf.feature_importances_
+        except Exception as e:
+            st.warning(f"CatBoost failed: {e}")
+        try:
+            rf_clf.fit(X_train_scaled, y_train)
+            models_for_ensemble.append(('rf', rf_clf))
+            model_status.append('RF OK')
+            importances['RF'] = rf_clf.feature_importances_
+        except Exception as e:
+            st.warning(f"RandomForest failed: {e}")
+        try:
+            gb_clf.fit(X_train_scaled, y_train)
+            models_for_ensemble.append(('gb', gb_clf))
+            model_status.append('GB OK')
+            importances['GB'] = gb_clf.feature_importances_
+        except Exception as e:
+            st.warning(f"GBM failed: {e}")
+        try:
+            lr_clf.fit(X_train_scaled, y_train)
+            models_for_ensemble.append(('lr', lr_clf))
+            model_status.append('LR OK')
+            importances['LR'] = np.abs(lr_clf.coef_[0])
+        except Exception as e:
+            st.warning(f"LogReg failed: {e}")
+
+        st.info("Model training status: " + ', '.join(model_status))
+        if not models_for_ensemble:
+            st.error("All models failed to train! Try reducing features or rows.")
             st.stop()
-        event_df = fix_types(event_df)
-        today_df = fix_types(today_df)
 
-    target_col = 'hr_outcome'
-    if target_col not in event_df.columns:
-        st.error("ERROR: No valid hr_outcome column found in event-level file.")
-        st.stop()
-    st.success("✅ 'hr_outcome' column found in event-level data.")
+        st.write("Fitting ensemble (soft voting)...")
+        ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+        ensemble.fit(X_train_scaled, y_train)
 
-    value_counts = event_df[target_col].value_counts(dropna=False).reset_index()
-    value_counts.columns = [target_col, 'count']
-    st.write("Value counts for hr_outcome:")
-    st.dataframe(value_counts)
+        st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
+        tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
+        if tree_keys:
+            tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
+            import_df = pd.DataFrame({
+                "feature": X.columns,
+                "importance": tree_importances
+            }).sort_values("importance", ascending=False)
+            st.dataframe(import_df.head(30), use_container_width=True)
+            fig, ax = plt.subplots(figsize=(7,5))
+            ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
+            ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
+            st.pyplot(fig)
+        else:
+            st.warning("Tree model feature importances not available.")
 
-    # Only keep features present in BOTH event and today sets (intersection)
-    feat_cols_train = set(get_valid_feature_cols(event_df))
-    feat_cols_today = set(get_valid_feature_cols(today_df))
-    feature_cols = sorted(list(feat_cols_train & feat_cols_today))
+        st.write("Validating (out-of-fold, not test-leak)...")
+        y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
+        auc = roc_auc_score(y_val, y_val_pred)
+        ll = log_loss(y_val, y_val_pred)
+        st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
-    st.write(f"Number of features in both event/today: {len(feature_cols)}")
-    st.write(f"Features being used: {feature_cols}")
+        st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
+        ir = IsotonicRegression(out_of_bounds="clip")
+        y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+        st.write("Predicting HR probability for today (calibrated)...")
+        y_today_pred = ensemble.predict_proba(X_today_scaled)[:,1]
+        y_today_pred_cal = ir.transform(y_today_pred)
+        today_df['hr_probability'] = y_today_pred_cal
 
-    # ===== APPLY FEATURE ENGINEERING (deep research block) =====
-    event_df = feature_engineering(event_df)
-    today_df = feature_engineering(today_df)
-    # Recalc features intersection after engineering
-    feat_cols_train = set(get_valid_feature_cols(event_df))
-    feat_cols_today = set(get_valid_feature_cols(today_df))
-    feature_cols = sorted(list(feat_cols_train & feat_cols_today))
+        st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
+        if 'hr_probability' in today_df.columns:
+            today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
+            today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+        else:
+            today_df['final_hr_probability'] = today_df['hr_probability']
 
-    X = clean_X(event_df[feature_cols])
-    y = event_df[target_col]
-    X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
-    X = downcast_df(X)
-    X_today = downcast_df(X_today)
+        leaderboard_cols = []
+        if "player_name" in today_df.columns:
+            leaderboard_cols.append("player_name")
+        leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
+        leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
+        leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+        leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
+        leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
-    nan_inf_check(X, "X features")
-    nan_inf_check(X_today, "X_today features")
+        st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
+        leaderboard_top10 = leaderboard.head(10)
+        st.dataframe(leaderboard_top10, use_container_width=True)
+        if len(leaderboard) > 10:
+            gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard.loc[10, "final_hr_probability"]
+            st.markdown(f"**Confidence gap between Top 10/11:** `{gap:.4f}`")
+        else:
+            st.markdown("**Confidence gap:** (less than 11 players in leaderboard)")
 
-    st.write("Splitting for validation and scaling...")
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today)
+        st.download_button(
+            "⬇️ Download Full Prediction CSV",
+            data=today_df.to_csv(index=False),
+            file_name="today_hr_predictions.csv"
+        )
+        st.download_button(
+            "⬇️ Download Top 10 Leaderboard CSV",
+            data=leaderboard_top10.to_csv(index=False),
+            file_name="top10_leaderboard.csv"
+        )
 
-    # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
-    st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
-    xgb_clf = xgb.XGBClassifier(
-        n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
-        n_jobs=1, verbosity=1, tree_method='hist'
-    )
-    lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
-    cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
-    rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
-    gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
-    lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-
-    model_status = []
-    models_for_ensemble = []
-    importances = {}
-    try:
-        xgb_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('xgb', xgb_clf))
-        model_status.append('XGB OK')
-        importances['XGB'] = xgb_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"XGBoost failed: {e}")
-    try:
-        lgb_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('lgb', lgb_clf))
-        model_status.append('LGB OK')
-        importances['LGB'] = lgb_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"LightGBM failed: {e}")
-    try:
-        cat_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('cat', cat_clf))
-        model_status.append('CatBoost OK')
-        importances['CatBoost'] = cat_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"CatBoost failed: {e}")
-    try:
-        rf_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('rf', rf_clf))
-        model_status.append('RF OK')
-        importances['RF'] = rf_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"RandomForest failed: {e}")
-    try:
-        gb_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('gb', gb_clf))
-        model_status.append('GB OK')
-        importances['GB'] = gb_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"GBM failed: {e}")
-    try:
-        lr_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('lr', lr_clf))
-        model_status.append('LR OK')
-        importances['LR'] = np.abs(lr_clf.coef_[0])
-    except Exception as e:
-        st.warning(f"LogReg failed: {e}")
-
-    st.info("Model training status: " + ', '.join(model_status))
-    if not models_for_ensemble:
-        st.error("All models failed to train! Try reducing features or rows.")
-        st.stop()
-
-    st.write("Fitting ensemble (soft voting)...")
-    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    ensemble.fit(X_train_scaled, y_train)
-
-    # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
-    st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
-    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
-    if tree_keys:
-        tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
-        import_df = pd.DataFrame({
-            "feature": X.columns,
-            "importance": tree_importances
-        }).sort_values("importance", ascending=False)
-        st.dataframe(import_df.head(30), use_container_width=True)
-        fig, ax = plt.subplots(figsize=(7,5))
-        ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
-        ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
-        st.pyplot(fig)
     else:
-        st.warning("Tree model feature importances not available.")
-
-    # =========== VALIDATION ===========
-    st.write("Validating (out-of-fold, not test-leak)...")
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
-    auc = roc_auc_score(y_val, y_val_pred)
-    ll = log_loss(y_val, y_val_pred)
-    st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
-
-    # =========== CALIBRATION (Isotonic Regression) ===========
-    st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
-    ir = IsotonicRegression(out_of_bounds="clip")
-    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-    # =========== PREDICT ===========
-    st.write("Predicting HR probability for today (calibrated)...")
-    y_today_pred = ensemble.predict_proba(X_today_scaled)[:,1]
-    y_today_pred_cal = ir.transform(y_today_pred)
-    today_df['hr_probability'] = y_today_pred_cal
-
-    # ==== APPLY OVERLAY SCORING ====
-    st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
-    if 'hr_probability' in today_df.columns:
-        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
-    else:
-        today_df['final_hr_probability'] = today_df['hr_probability']
-
-    # ==== TOP 10 PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
-    leaderboard_cols = []
-    if "player_name" in today_df.columns:
-        leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
-    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
-    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
-
-    st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
-    leaderboard_top10 = leaderboard.head(10)
-    st.dataframe(leaderboard_top10, use_container_width=True)
-
-    if len(leaderboard) > 10:
-        gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard
+        st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
