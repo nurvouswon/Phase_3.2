@@ -191,7 +191,10 @@ if event_file is not None and today_file is not None:
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
-
+    # Show stats for the three players
+    st.write("Addison Barger:", X_today[today_df['player_name'] == 'Addison Barger'])
+    st.write("George Springer:", X_today[today_df['player_name'] == 'George Springer'])
+    st.write("Jake McCarthy:", X_today[today_df['player_name'] == 'Jake McCarthy'])
     # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
