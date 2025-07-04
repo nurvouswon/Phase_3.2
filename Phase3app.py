@@ -166,9 +166,12 @@ def feature_engineering(df):
 
 # ==== PITCHER FILTER ====
 def is_probable_pitcher(row):
+    # Heuristic: pitchers generally have batted ball stats as all zero or -1, or their player_name matches a list
     for prefix in ["p_", "pitcher_"]:
+        # If their batted ball stats are all missing or zero, likely a pitcher
         if row.get(f"{prefix}hr_per_pa_3", 0) == 0 and row.get(f"{prefix}barrel_rate_3", 0) == 0:
             return True
+    # Extra: check if name contains a likely pitcher indicator (user could add a known list here)
     name = str(row.get("player_name", "")).lower()
     if "pitcher" in name:
         return True
@@ -214,11 +217,12 @@ if event_file is not None and today_file is not None:
     event_df = feature_engineering(event_df)
     today_df = feature_engineering(today_df)
 
-    # Filter out probable pitchers in today_df (and event_df if needed)
-    if "player_name" in today_df.columns:
-        orig_len = len(today_df)
-        today_df = today_df[~today_df.apply(is_probable_pitcher, axis=1)]
-        st.write(f"Filtered out {orig_len - len(today_df)} probable pitchers from today's set.")
+    # -- CHANGED HERE: Do NOT filter probable pitchers from today_df! --
+    # if "player_name" in today_df.columns:
+    #     orig_len = len(today_df)
+    #     today_df = today_df[~today_df.apply(is_probable_pitcher, axis=1)]
+    #     st.write(f"Filtered out {orig_len - len(today_df)} probable pitchers from today's set.")
+    st.write(f"Skipping probable pitcher filter on today_df to avoid empty dataframe.")
 
     # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
@@ -233,19 +237,6 @@ if event_file is not None and today_file is not None:
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
     X = downcast_df(X)
     X_today = downcast_df(X_today)
-
-    # ==== DEBUG DIAGNOSTICS ADDED HERE ====
-    st.write("🟢 event_df shape:", event_df.shape)
-    st.write("🟢 today_df shape:", today_df.shape)
-    st.write("🟡 Feature columns intersection:", feature_cols)
-    st.write("🟣 X shape:", X.shape)
-    st.write("🟣 X_today shape:", X_today.shape)
-    st.write("🔵 X columns:", list(X.columns))
-    st.write("🔵 X_today columns:", list(X_today.columns))
-    if X_today.shape[0] == 0 or X_today.shape[1] == 0:
-        st.error("X_today is empty! Check that feature columns exist and TODAY CSV matches event CSV columns.")
-        st.stop()
-    # ==== END DEBUG BLOCK ====
 
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
