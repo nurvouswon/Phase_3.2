@@ -64,6 +64,18 @@ def get_valid_feature_cols(df, drop=None):
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
 
+def drop_high_na_low_var(df, thresh_na=1.0, thresh_var=0.0):
+    cols_to_drop = []
+    na_frac = df.isnull().mean()
+    low_var_cols = df.select_dtypes(include=[np.number]).columns[df.select_dtypes(include=[np.number]).std() < thresh_var]
+    for c in df.columns:
+        if na_frac.get(c, 0) > thresh_na:
+            cols_to_drop.append(c)
+        elif c in low_var_cols:
+            cols_to_drop.append(c)
+    df2 = df.drop(columns=cols_to_drop, errors="ignore")
+    return df2, cols_to_drop
+
 def downcast_df(df):
     float_cols = df.select_dtypes(include=['float'])
     int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
@@ -72,15 +84,6 @@ def downcast_df(df):
     for col in int_cols:
         df[col] = pd.to_numeric(df[col], downcast='integer')
     return df
-
-def nan_inf_check(df, name):
-    numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
-    nans = np.isnan(arr).sum()
-    infs = np.isinf(arr).sum()
-    if nans > 0 or infs > 0:
-        st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
-        st.stop()
 
 # ==== GAME DAY OVERLAY MULTIPLIERS ====
 def overlay_multiplier(row):
@@ -113,42 +116,6 @@ def overlay_multiplier(row):
         multiplier *= pf
     return multiplier
 
-# ==== FEATURE ENGINEERING BLOCK ====
-def feature_engineering(df):
-    # ====== DELTA/DIFFERENCE FEATURES ======
-    windows_short = [3, 5, 7]
-    windows_long = [14, 20, 30, 60]
-    stat_bases = [
-        'b_hr_per_pa', 'b_barrel_rate', 'b_hard_hit_rate', 'b_fb_rate', 'b_slg', 'b_avg_exit_velo',
-        'p_hr_per_pa', 'p_barrel_rate', 'p_hard_hit_rate', 'p_fb_rate', 'p_slg', 'p_avg_exit_velo'
-    ]
-    for stat in stat_bases:
-        for w_s in windows_short:
-            for w_l in windows_long:
-                col_short = f"{stat}_{w_s}"
-                col_long = f"{stat}_{w_l}"
-                if col_short in df.columns and col_long in df.columns:
-                    df[f"delta_{stat}_{w_s}_{w_l}"] = df[col_short] - df[col_long]
-    for stat in stat_bases:
-        for w_s in windows_short:
-            for w_l in windows_long:
-                col_short = f"{stat}_{w_s}"
-                col_long = f"{stat}_{w_l}"
-                if col_short in df.columns and col_long in df.columns:
-                    df[f"is_hot_{stat}_{w_s}_{w_l}"] = (df[col_short] > df[col_long]).astype(int)
-    for bstat in ['b_hr_per_pa_3', 'b_barrel_rate_3', 'b_slg_3', 'b_avg_exit_velo_3']:
-        for pstat in ['p_hr_per_pa_3', 'p_barrel_rate_3', 'p_slg_3', 'p_avg_exit_velo_3']:
-            if bstat in df.columns and pstat in df.columns:
-                df[f"{bstat}_X_{pstat}"] = df[bstat] * df[pstat]
-    for col in df.columns:
-        if 'hr_per_pa' in col:
-            df[col] = df[col].clip(0, 0.25)
-        if 'avg_exit_velo' in col:
-            df[col] = df[col].clip(70, 120)
-        if 'barrel_rate' in col or 'hard_hit_rate' in col or 'fb_rate' in col or 'pull_rate' in col:
-            df[col] = df[col].clip(0, 1)
-    return df
-
 # ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
@@ -157,12 +124,14 @@ if event_file is not None and today_file is not None:
     with st.spinner("Loading and prepping files (1-2 min, be patient)..."):
         event_df = safe_read(event_file)
         today_df = safe_read(today_file)
+        # Drop columns that are all NaN in event or today df
         event_df = event_df.dropna(axis=1, how='all')
         today_df = today_df.dropna(axis=1, how='all')
         event_df = dedup_columns(event_df)
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
+
         dupes_event = find_duplicate_columns(event_df)
         if dupes_event:
             st.error(f"Duplicate columns in event file after deduplication: {set(dupes_event)}")
@@ -171,6 +140,10 @@ if event_file is not None and today_file is not None:
         if dupes_today:
             st.error(f"Duplicate columns in today file after deduplication: {set(dupes_today)}")
             st.stop()
+
+        st.write(f"Loaded event-level: {getattr(event_file, 'name', 'event_file')} shape {event_df.shape}")
+        st.write(f"Loaded today: {getattr(today_file, 'name', 'today_file')} shape {today_df.shape}")
+
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
 
@@ -185,41 +158,30 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
+    # Only drop columns that are all NaN (no filtering on missing or variance)
+    event_df, _ = drop_high_na_low_var(event_df, thresh_na=1.0, thresh_var=0.0)
+    today_df, _ = drop_high_na_low_var(today_df, thresh_na=1.0, thresh_var=0.0)
+
+    st.write("Remaining columns event-level:")
+    st.write(list(event_df.columns))
+    st.write("Remaining columns today:")
+    st.write(list(today_df.columns))
+
+    st.write("🚨 Skipping cluster-correlation feature dropping — feeding all valid features to model.")
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-
-    st.write(f"Number of features in both event/today: {len(feature_cols)}")
-    st.write(f"Features being used: {feature_cols}")
-
-    # ===== APPLY FEATURE ENGINEERING =====
-    event_df = feature_engineering(event_df)
-    today_df = feature_engineering(today_df)
-    # Recalc features intersection after engineering
-    feat_cols_train = set(get_valid_feature_cols(event_df))
-    feat_cols_today = set(get_valid_feature_cols(today_df))
-    feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-
-    # ====== BATTER-ONLY FILTER ======
-    # (Tries to auto-detect: position column or is_batter)
-    if 'is_batter' in today_df.columns:
-        today_df = today_df[today_df['is_batter'] == 1].copy()
-    elif 'position' in today_df.columns:
-        today_df = today_df[~today_df['position'].str.startswith('P')].copy()
-    # If neither, don't filter but warn
-    elif any(name in today_df.columns for name in ['batter_name', 'bat_order']):
-        pass
-    else:
-        st.warning("Warning: Could not auto-detect batter-only rows; pitchers may be included!")
-
+    # Print/display final features used
+    st.markdown("### 📋 Final Features Used In Model")
+    st.code('\n'.join(feature_cols), language="python")
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
-    nan_inf_check(X, "X features")
-    nan_inf_check(X_today, "X_today features")
+    st.write("DEBUG: X shape:", X.shape)
+    st.write("DEBUG: y shape:", y.shape)
 
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
@@ -233,14 +195,14 @@ if event_file is not None and today_file is not None:
     # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
-        n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
+        n_estimators=60, max_depth=5, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss',
         n_jobs=1, verbosity=1, tree_method='hist'
     )
-    lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
-    cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
-    rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
-    gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
-    lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+    lgb_clf = lgb.LGBMClassifier(n_estimators=60, max_depth=5, learning_rate=0.08, n_jobs=1)
+    cat_clf = cb.CatBoostClassifier(iterations=60, depth=5, learning_rate=0.09, verbose=0, thread_count=1)
+    rf_clf = RandomForestClassifier(n_estimators=40, max_depth=7, n_jobs=1)
+    gb_clf = GradientBoostingClassifier(n_estimators=40, max_depth=5, learning_rate=0.09)
+    lr_clf = LogisticRegression(max_iter=400, solver='lbfgs', n_jobs=1)
 
     model_status = []
     models_for_ensemble = []
@@ -307,6 +269,7 @@ if event_file is not None and today_file is not None:
             "importance": tree_importances
         }).sort_values("importance", ascending=False)
         st.dataframe(import_df.head(30), use_container_width=True)
+        # Plot
         fig, ax = plt.subplots(figsize=(7,5))
         ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
         ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
@@ -315,17 +278,16 @@ if event_file is not None and today_file is not None:
         st.warning("Tree model feature importances not available.")
 
     # =========== VALIDATION ===========
-    st.write("Validating (out-of-fold, not test-leak)...")
+    st.write("Validating...")
     y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
-    # =========== CALIBRATION (Isotonic Regression) ===========
+    # =========== PREDICT (WITH ISOTONIC CALIBRATION) ===========
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-    # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
     y_today_pred = ensemble.predict_proba(X_today_scaled)[:,1]
     y_today_pred_cal = ir.transform(y_today_pred)
@@ -349,18 +311,19 @@ if event_file is not None and today_file is not None:
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
+    # Top 10 + precision/confidence gap display
     st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
     leaderboard_top10 = leaderboard.head(10)
     st.dataframe(leaderboard_top10, use_container_width=True)
 
-    # Confidence gap between #10 and #11
+    # Confidence gap: drop-off between #10 and #11
     if len(leaderboard) > 10:
         gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard.loc[10, "final_hr_probability"]
         st.markdown(f"**Confidence gap between Top 10/11:** `{gap:.4f}`")
     else:
         st.markdown("**Confidence gap:** (less than 11 players in leaderboard)")
 
-    # CSV download for full leaderboard and top 10
+    # Download full leaderboard and prediction CSVs
     st.download_button(
         "⬇️ Download Full Prediction CSV",
         data=today_df.to_csv(index=False),
