@@ -75,8 +75,9 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number])
-    nans = numeric_df.isna().sum().sum()
-    infs = np.isinf(numeric_df.values).sum()
+    arr = np.array(numeric_df, dtype=np.float64)  # Safe conversion for inf check
+    nans = np.isnan(arr).sum()
+    infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
@@ -299,14 +300,14 @@ if event_file is not None and today_file is not None:
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
     st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
-    leaderboard_top10 = leaderboard.head(10)
+    leaderboard_top10 = leaderboard.head(30)
     st.dataframe(leaderboard_top10, use_container_width=True)
 
-    if len(leaderboard) > 10:
-        gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard.loc[10, "final_hr_probability"]
-        st.markdown(f"**Confidence gap between Top 10/11:** `{gap:.4f}`")
+    if len(leaderboard) > 30:
+        gap = leaderboard.loc[29, "final_hr_probability"] - leaderboard.loc[30, "final_hr_probability"]
+        st.markdown(f"**Confidence gap between Top 30/31:** `{gap:.4f}`")
     else:
-        st.markdown("**Confidence gap:** (less than 11 players in leaderboard)")
+        st.markdown("**Confidence gap:** (less than 31 players in leaderboard)")
 
     st.download_button(
         "⬇️ Download Full Prediction CSV",
@@ -314,7 +315,7 @@ if event_file is not None and today_file is not None:
         file_name="today_hr_predictions.csv"
     )
     st.download_button(
-        "⬇️ Download Top 10 Leaderboard CSV",
+        "⬇️ Download Top 30 Leaderboard CSV",
         data=leaderboard_top10.to_csv(index=False),
         file_name="top10_leaderboard.csv"
     )
