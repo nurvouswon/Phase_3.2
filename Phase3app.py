@@ -74,10 +74,10 @@ def downcast_df(df):
     return df
 
 def nan_inf_check(df, name):
-    # Only use columns that can be safely cast to float
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    nans = numeric_df.isna().sum().sum()
-    infs = np.isinf(numeric_df.values).sum()
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Forces to float, ensures np.isinf works
+    nans = np.isnan(arr).sum()
+    infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
