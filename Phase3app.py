@@ -74,8 +74,9 @@ def downcast_df(df):
     return df
 
 def nan_inf_check(df, name):
-    nans = df.isna().sum().sum()
-    infs = np.isinf(df.values).sum()
+    numeric_df = df.select_dtypes(include=[np.number])
+    nans = numeric_df.isna().sum().sum()
+    infs = np.isinf(numeric_df.values).sum()
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
