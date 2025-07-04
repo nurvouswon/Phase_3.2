@@ -87,7 +87,7 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
@@ -166,12 +166,9 @@ def feature_engineering(df):
 
 # ==== PITCHER FILTER ====
 def is_probable_pitcher(row):
-    # Heuristic: pitchers generally have batted ball stats as all zero or -1, or their player_name matches a list
     for prefix in ["p_", "pitcher_"]:
-        # If their batted ball stats are all missing or zero, likely a pitcher
         if row.get(f"{prefix}hr_per_pa_3", 0) == 0 and row.get(f"{prefix}barrel_rate_3", 0) == 0:
             return True
-    # Extra: check if name contains a likely pitcher indicator (user could add a known list here)
     name = str(row.get("player_name", "")).lower()
     if "pitcher" in name:
         return True
@@ -217,12 +214,7 @@ if event_file is not None and today_file is not None:
     event_df = feature_engineering(event_df)
     today_df = feature_engineering(today_df)
 
-    # -- CHANGED HERE: Do NOT filter probable pitchers from today_df! --
-    # if "player_name" in today_df.columns:
-    #     orig_len = len(today_df)
-    #     today_df = today_df[~today_df.apply(is_probable_pitcher, axis=1)]
-    #     st.write(f"Filtered out {orig_len - len(today_df)} probable pitchers from today's set.")
-    st.write(f"Skipping probable pitcher filter on today_df to avoid empty dataframe.")
+    st.write("Skipping probable pitcher filter on today_df to avoid empty dataframe.")
 
     # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
@@ -345,7 +337,6 @@ if event_file is not None and today_file is not None:
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-    # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
     y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
@@ -372,59 +363,56 @@ if event_file is not None and today_file is not None:
 
     # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
+
+    leaderboard_top = leaderboard.head(top_n)
+
     # ============================
     # POST-POOL REFINEMENT: STACKED META-MODEL ON TOP 30
     # ============================
-
     import warnings
     warnings.filterwarnings('ignore')
-
     from sklearn.linear_model import LogisticRegression
 
-    # 1. List your top features by importance (from your import_df above)
+    # Use top features (from previous import_df or hardcoded list)
     top_features = [
         "b_time_since_hr_3", "p_time_since_hr_3", "b_slg_60", "p_hit_dist_avg_14", "b_hit_dist_avg_7",
         "b_slg_14", "b_spray_angle_std_5", "p_rolling_hr9_3", "b_spray_angle_std_7", "p_spray_angle_std_14",
         "b_hit_dist_avg_14", "b_slg_20", "b_hit_dist_avg_3", "b_barrel_rate_60", "b_avg_exit_velo_14",
         "p_hit_dist_avg_3", "p_spray_angle_std_14", "p_spray_angle_avg_7", "p_spray_angle_std_3", "p_slg_14"
     ]
-    # Keep only features present in leaderboard_top30
-    available_features = [f for f in top_features if f in leaderboard_top30.columns]
+    available_features = [f for f in top_features if f in leaderboard_top.columns]
 
-    # 2. Prepare meta-features: final prob + key feature columns
-    meta_X = leaderboard_top30[["final_hr_probability"] + available_features].copy()
+    # Prepare meta-model training data
+    meta_X = leaderboard_top[["final_hr_probability"] + available_features].copy()
+    meta_y = (leaderboard_top["final_hr_probability"].rank(method="first", ascending=False) <= 10).astype(int)
 
-    # 3. Simulated target: treat Top 10 as "1", the rest as "0"
-    meta_y = (leaderboard_top30["final_hr_probability"].rank(method="first", ascending=False) <= 10).astype(int)
-
-    # 4. Train meta-model (LogisticRegression is robust & interpretable for this size)
     meta_model = LogisticRegression()
     meta_model.fit(meta_X, meta_y)
-    leaderboard_top30["meta_refined_prob"] = meta_model.predict_proba(meta_X)[:, 1]
+    leaderboard_top["meta_refined_prob"] = meta_model.predict_proba(meta_X)[:, 1]
 
-    # 5. Rank by meta-model probability (your final refined leaderboard)
-    refined_leaderboard = leaderboard_top30.sort_values("meta_refined_prob", ascending=False).reset_index(drop=True)
+    # Sort/refine the leaderboard
+    refined_leaderboard = leaderboard_top.sort_values("meta_refined_prob", ascending=False).reset_index(drop=True)
 
     st.markdown("### 🏅 **Refined Top 10 (Meta-Model Stacking, Deep Research)**")
     st.dataframe(refined_leaderboard.head(10), use_container_width=True)
     st.markdown("#### ⬇️ Download Refined Leaderboards")
     st.download_button(
-    "Download Refined Top 10 Leaderboard CSV",
-    data=refined_leaderboard.head(10).to_csv(index=False),
-    file_name="refined_top10_leaderboard.csv"
+        "Download Refined Top 10 Leaderboard CSV",
+        data=refined_leaderboard.head(10).to_csv(index=False),
+        file_name="refined_top10_leaderboard.csv"
     )
     st.download_button(
         "Download Refined Top 15 Leaderboard CSV",
         data=refined_leaderboard.head(15).to_csv(index=False),
         file_name="refined_top15_leaderboard.csv"
-     )
+    )
     st.download_button(
         "Download Refined Top 30 Leaderboard CSV",
         data=refined_leaderboard.to_csv(index=False),
         file_name="refined_top30_leaderboard.csv"
     )
 
-    # 6. (Optional) Show feature weights for transparency
+    # Feature weights for transparency
     with st.expander("Meta-Model Feature Weights (for interpretability)"):
         coef_df = pd.DataFrame({
             "feature": meta_X.columns,
@@ -432,18 +420,18 @@ if event_file is not None and today_file is not None:
         }).sort_values("weight", ascending=False)
         st.dataframe(coef_df)
 
-    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
-    leaderboard_top = leaderboard.head(top_n)
+    # Show original Top N (calibrated, overlay, before meta-refinement)
+    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated, pre-meta-refinement)**")
     st.dataframe(leaderboard_top, use_container_width=True)
 
-    # Confidence gap: drop-off between last included and next
+    # Confidence gap
     if len(leaderboard) > top_n:
         gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
         st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
     else:
         st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
 
-    # Download full leaderboard and prediction CSVs
+    # Download buttons for full predictions and Top N
     st.download_button(
         f"⬇️ Download Full Prediction CSV",
         data=today_df.to_csv(index=False),
