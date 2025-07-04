@@ -26,15 +26,12 @@ def safe_read(path):
         return pd.read_csv(path, encoding='latin1', low_memory=False)
 
 def dedup_columns(df):
-    """Remove duplicate columns by name, keep first occurrence."""
     return df.loc[:, ~df.columns.duplicated()]
 
 def find_duplicate_columns(df):
-    """Find columns that are duplicates by name."""
     return [col for col in df.columns if list(df.columns).count(col) > 1]
 
 def fix_types(df):
-    """Force numeric where possible, leave allowed object columns untouched."""
     for col in df.columns:
         if df[col].isnull().all():
             continue
@@ -48,7 +45,6 @@ def fix_types(df):
     return df
 
 def clean_X(df, train_cols=None):
-    """Drop unwanted object columns and fill NAs."""
     df = dedup_columns(df)
     df = fix_types(df)
     allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status'}
@@ -69,7 +65,6 @@ def get_valid_feature_cols(df, drop=None):
     return [c for c in numerics if c not in base_drop]
 
 def downcast_df(df):
-    """Downcast numerics for RAM efficiency."""
     float_cols = df.select_dtypes(include=['float'])
     int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
     for col in float_cols:
@@ -77,6 +72,13 @@ def downcast_df(df):
     for col in int_cols:
         df[col] = pd.to_numeric(df[col], downcast='integer')
     return df
+
+def nan_inf_check(df, name):
+    nans = df.isna().sum().sum()
+    infs = np.isinf(df.values).sum()
+    if nans > 0 or infs > 0:
+        st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
+        st.stop()
 
 # ==== GAME DAY OVERLAY MULTIPLIERS ====
 def overlay_multiplier(row):
@@ -126,12 +128,6 @@ if event_file is not None and today_file is not None:
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
 
-        # DIAGNOSTICS: Show shapes and columns for debug
-        st.write(f"Event df shape: {event_df.shape}")
-        st.write(f"Today df shape: {today_df.shape}")
-        st.write(f"Event columns (sample): {event_df.columns[:10].tolist()} ...")
-        st.write(f"Today columns (sample): {today_df.columns[:10].tolist()} ...")
-
         # Error on duplicates
         dupes_event = find_duplicate_columns(event_df)
         if dupes_event:
@@ -156,12 +152,13 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    # Drop only all-NaN columns and columns not present in both
+    # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
 
     st.write(f"Number of features in both event/today: {len(feature_cols)}")
+    st.write(f"Features being used: {feature_cols}")
 
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
@@ -169,14 +166,8 @@ if event_file is not None and today_file is not None:
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
-    st.write("DEBUG: X shape:", X.shape)
-    st.write("DEBUG: y shape:", y.shape)
-    st.write("DEBUG: X_today shape:", X_today.shape)
-
-    # Additional NA/infinite check
-    if pd.isna(X).any().any() or pd.isna(y).any():
-        st.error("NaNs found in features or target. Please clean your input data.")
-        st.stop()
+    nan_inf_check(X, "X features")
+    nan_inf_check(X_today, "X_today features")
 
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
@@ -190,14 +181,14 @@ if event_file is not None and today_file is not None:
     # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
-        n_estimators=60, max_depth=5, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss',
+        n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
         n_jobs=1, verbosity=1, tree_method='hist'
     )
-    lgb_clf = lgb.LGBMClassifier(n_estimators=60, max_depth=5, learning_rate=0.08, n_jobs=1)
-    cat_clf = cb.CatBoostClassifier(iterations=60, depth=5, learning_rate=0.09, verbose=0, thread_count=1)
-    rf_clf = RandomForestClassifier(n_estimators=40, max_depth=7, n_jobs=1)
-    gb_clf = GradientBoostingClassifier(n_estimators=40, max_depth=5, learning_rate=0.09)
-    lr_clf = LogisticRegression(max_iter=400, solver='lbfgs', n_jobs=1)
+    lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
+    cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
+    rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
+    gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
+    lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
 
     model_status = []
     models_for_ensemble = []
@@ -272,7 +263,7 @@ if event_file is not None and today_file is not None:
         st.warning("Tree model feature importances not available.")
 
     # =========== VALIDATION ===========
-    st.write("Validating...")
+    st.write("Validating (out-of-fold, not test-leak)...")
     y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
