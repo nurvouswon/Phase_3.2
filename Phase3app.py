@@ -1,21 +1,21 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, log_loss, accuracy_score
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import roc_auc_score, log_loss
+from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 import matplotlib.pyplot as plt
+from sklearn.isotonic import IsotonicRegression
 
-st.set_page_config("2️⃣ MLB HR Predictor — World Class Deep Research", layout="wide")
-st.title("2️⃣ MLB HR Predictor — World Class Deep Research [Stacked Ensemble | Meta-Learning | Feature Science]")
+st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
+st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
 
-# ============ FILE HELPERS =============
+# ==== FILE HELPERS ====
 def safe_read(path):
     fn = str(getattr(path, 'name', path)).lower()
     if fn.endswith('.parquet'):
@@ -26,12 +26,15 @@ def safe_read(path):
         return pd.read_csv(path, encoding='latin1', low_memory=False)
 
 def dedup_columns(df):
+    """Remove duplicate columns by name, keep first occurrence."""
     return df.loc[:, ~df.columns.duplicated()]
 
 def find_duplicate_columns(df):
+    """Find columns that are duplicates by name."""
     return [col for col in df.columns if list(df.columns).count(col) > 1]
 
 def fix_types(df):
+    """Force numeric where possible, leave allowed object columns untouched."""
     for col in df.columns:
         if df[col].isnull().all():
             continue
@@ -45,6 +48,7 @@ def fix_types(df):
     return df
 
 def clean_X(df, train_cols=None):
+    """Drop unwanted object columns and fill NAs."""
     df = dedup_columns(df)
     df = fix_types(df)
     allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status'}
@@ -65,6 +69,7 @@ def get_valid_feature_cols(df, drop=None):
     return [c for c in numerics if c not in base_drop]
 
 def downcast_df(df):
+    """Downcast numerics for RAM efficiency."""
     float_cols = df.select_dtypes(include=['float'])
     int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
     for col in float_cols:
@@ -73,39 +78,9 @@ def downcast_df(df):
         df[col] = pd.to_numeric(df[col], downcast='integer')
     return df
 
-# ============ ADVANCED FEATURE ENGINEERING =============
-def make_deltas(df, base_features, windows=[3,5,7,14,20,30,60]):
-    """Add delta and pct change features for rolling windows."""
-    for base in base_features:
-        for i, win1 in enumerate(windows[:-1]):
-            for win2 in windows[i+1:]:
-                col1, col2 = f"{base}_{win1}", f"{base}_{win2}"
-                if col1 in df.columns and col2 in df.columns:
-                    df[f"{base}_delta_{win1}_{win2}"] = df[col1] - df[col2]
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        df[f"{base}_pctchg_{win1}_{win2}"] = np.where(df[col2]!=0, (df[col1] - df[col2]) / df[col2], 0)
-    return df
-
-def make_interactions(df, group1, group2):
-    """Multiply every col in group1 by every col in group2 (for batter vs pitcher)."""
-    for a in group1:
-        for b in group2:
-            if a in df.columns and b in df.columns:
-                df[f"{a}_X_{b}"] = df[a] * df[b]
-    return df
-
-def add_context_dummies(df, context_cols):
-    """One-hot encode categorical context columns."""
-    for col in context_cols:
-        if col in df.columns:
-            dummies = pd.get_dummies(df[col], prefix=col, drop_first=True)
-            df = pd.concat([df, dummies], axis=1)
-    return df
-
-# ============ GAME DAY OVERLAY (NO DOUBLE-COUNTING) ============
+# ==== GAME DAY OVERLAY MULTIPLIERS ====
 def overlay_multiplier(row):
     multiplier = 1.0
-    # Only overlay for factors NOT already in training features!
     wind_col = 'wind_mph'
     wind_dir_col = 'wind_dir_string'
     if wind_col in row and wind_dir_col in row:
@@ -134,21 +109,30 @@ def overlay_multiplier(row):
         multiplier *= pf
     return multiplier
 
-# ============ UI ============
+# ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
 if event_file is not None and today_file is not None:
-    with st.spinner("Loading and prepping files (deep research takes a minute)..."):
+    with st.spinner("Loading and prepping files (1-2 min, be patient)..."):
         event_df = safe_read(event_file)
         today_df = safe_read(today_file)
-        # Remove all-NA cols, dedup, etc.
+
+        # Drop columns that are all NaN in either df
         event_df = event_df.dropna(axis=1, how='all')
         today_df = today_df.dropna(axis=1, how='all')
         event_df = dedup_columns(event_df)
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
+
+        # DIAGNOSTICS: Show shapes and columns for debug
+        st.write(f"Event df shape: {event_df.shape}")
+        st.write(f"Today df shape: {today_df.shape}")
+        st.write(f"Event columns (sample): {event_df.columns[:10].tolist()} ...")
+        st.write(f"Today columns (sample): {today_df.columns[:10].tolist()} ...")
+
+        # Error on duplicates
         dupes_event = find_duplicate_columns(event_df)
         if dupes_event:
             st.error(f"Duplicate columns in event file after deduplication: {set(dupes_event)}")
@@ -157,6 +141,7 @@ if event_file is not None and today_file is not None:
         if dupes_today:
             st.error(f"Duplicate columns in today file after deduplication: {set(dupes_today)}")
             st.stop()
+
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
 
@@ -166,36 +151,17 @@ if event_file is not None and today_file is not None:
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
 
-    # ---- Feature set-up: get only columns present in both sets ----
+    value_counts = event_df[target_col].value_counts(dropna=False).reset_index()
+    value_counts.columns = [target_col, 'count']
+    st.write("Value counts for hr_outcome:")
+    st.dataframe(value_counts)
+
+    # Drop only all-NaN columns and columns not present in both
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
 
-    # ==== SUPERCHARGED FEATURE ENGINEERING ====
-    base_rolling_stats = [
-        "b_avg_exit_velo", "b_barrel_rate", "b_fb_rate", "b_hard_contact_rate", "b_hard_hit_rate",
-        "b_hit_dist_avg", "b_pull_rate", "b_slg", "b_spray_angle_avg", "b_spray_angle_std",
-        "b_sweet_spot_rate", "p_avg_exit_velo", "p_barrel_rate", "p_fb_rate", "p_hard_contact_rate",
-        "p_hard_hit_rate", "p_hit_dist_avg", "p_pull_rate", "p_slg", "p_spray_angle_avg",
-        "p_spray_angle_std", "p_sweet_spot_rate"
-    ]
-    event_df = make_deltas(event_df, base_rolling_stats)
-    today_df = make_deltas(today_df, base_rolling_stats)
-
-    batter_feats = [c for c in event_df.columns if c.startswith("b_") and c.endswith(tuple(str(x) for x in [3,5,7,14,20,30,60]))]
-    pitcher_feats = [c for c in event_df.columns if c.startswith("p_") and c.endswith(tuple(str(x) for x in [3,5,7,14,20,30,60]))]
-    event_df = make_interactions(event_df, batter_feats, pitcher_feats)
-    today_df = make_interactions(today_df, batter_feats, pitcher_feats)
-
-    # One-hot encode selected context features if present
-    context_cols = ["batter_hand", "pitcher_hand", "stand", "p_throws", "roof_status", "condition"]
-    event_df = add_context_dummies(event_df, context_cols)
-    today_df = add_context_dummies(today_df, context_cols)
-
-    # Re-evaluate shared features after new columns added
-    feat_cols_train = set(get_valid_feature_cols(event_df))
-    feat_cols_today = set(get_valid_feature_cols(today_df))
-    feature_cols = sorted(list(feat_cols_train & feat_cols_today))
+    st.write(f"Number of features in both event/today: {len(feature_cols)}")
 
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
@@ -205,9 +171,14 @@ if event_file is not None and today_file is not None:
 
     st.write("DEBUG: X shape:", X.shape)
     st.write("DEBUG: y shape:", y.shape)
+    st.write("DEBUG: X_today shape:", X_today.shape)
 
-    # =========== DEEP RESEARCH STACKED ENSEMBLE ===========
-    st.write("Splitting for validation and scaling (Stratified)...")
+    # Additional NA/infinite check
+    if pd.isna(X).any().any() or pd.isna(y).any():
+        st.error("NaNs found in features or target. Please clean your input data.")
+        st.stop()
+
+    st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
@@ -216,7 +187,7 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # Train base models
+    # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
         n_estimators=60, max_depth=5, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss',
@@ -228,69 +199,104 @@ if event_file is not None and today_file is not None:
     gb_clf = GradientBoostingClassifier(n_estimators=40, max_depth=5, learning_rate=0.09)
     lr_clf = LogisticRegression(max_iter=400, solver='lbfgs', n_jobs=1)
 
-    base_models = [
-        ('xgb', xgb_clf),
-        ('lgb', lgb_clf),
-        ('cat', cat_clf),
-        ('rf', rf_clf),
-        ('gb', gb_clf),
-        ('lr', lr_clf)
-    ]
+    model_status = []
+    models_for_ensemble = []
+    importances = {}
+    try:
+        xgb_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('xgb', xgb_clf))
+        model_status.append('XGB OK')
+        importances['XGB'] = xgb_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"XGBoost failed: {e}")
+    try:
+        lgb_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('lgb', lgb_clf))
+        model_status.append('LGB OK')
+        importances['LGB'] = lgb_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"LightGBM failed: {e}")
+    try:
+        cat_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('cat', cat_clf))
+        model_status.append('CatBoost OK')
+        importances['CatBoost'] = cat_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"CatBoost failed: {e}")
+    try:
+        rf_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('rf', rf_clf))
+        model_status.append('RF OK')
+        importances['RF'] = rf_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"RandomForest failed: {e}")
+    try:
+        gb_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('gb', gb_clf))
+        model_status.append('GB OK')
+        importances['GB'] = gb_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"GBM failed: {e}")
+    try:
+        lr_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('lr', lr_clf))
+        model_status.append('LR OK')
+        importances['LR'] = np.abs(lr_clf.coef_[0])
+    except Exception as e:
+        st.warning(f"LogReg failed: {e}")
 
-    for name, model in base_models:
-        try:
-            model.fit(X_train_scaled, y_train)
-            st.write(f"{name} trained.")
-        except Exception as e:
-            st.warning(f"{name} failed: {e}")
+    st.info("Model training status: " + ', '.join(model_status))
+    if not models_for_ensemble:
+        st.error("All models failed to train! Try reducing features or rows.")
+        st.stop()
 
-    # Get validation predictions for stacking
-    val_preds = []
-    for name, model in base_models:
-        try:
-            val_pred = model.predict_proba(X_val_scaled)[:,1]
-            val_preds.append(val_pred)
-        except Exception:
-            val_preds.append(np.zeros_like(y_val))
-    val_preds = np.vstack(val_preds).T
+    st.write("Fitting ensemble (soft voting)...")
+    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+    ensemble.fit(X_train_scaled, y_train)
 
-    # Train meta-model (stacking)
-    st.write("Training meta-learner (Logistic Regression) on base model outputs...")
-    meta_lr = LogisticRegression(max_iter=300, solver='lbfgs')
-    meta_lr.fit(val_preds, y_val)
+    # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
+    st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
+    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
+    if tree_keys:
+        tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
+        import_df = pd.DataFrame({
+            "feature": X.columns,
+            "importance": tree_importances
+        }).sort_values("importance", ascending=False)
+        st.dataframe(import_df.head(30), use_container_width=True)
+        fig, ax = plt.subplots(figsize=(7,5))
+        ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
+        ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
+        st.pyplot(fig)
+    else:
+        st.warning("Tree model feature importances not available.")
 
-    # Calibrate with Isotonic Regression (on meta outputs)
-    st.write("Calibrating predictions (isotonic regression, top decile focus)...")
-    meta_val_pred = meta_lr.predict_proba(val_preds)[:,1]
+    # =========== VALIDATION ===========
+    st.write("Validating...")
+    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
+    auc = roc_auc_score(y_val, y_val_pred)
+    ll = log_loss(y_val, y_val_pred)
+    st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
+
+    # =========== CALIBRATION (Isotonic Regression) ===========
+    st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
-    ir.fit(meta_val_pred, y_val)
+    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+    # =========== PREDICT ===========
+    st.write("Predicting HR probability for today (calibrated)...")
+    y_today_pred = ensemble.predict_proba(X_today_scaled)[:,1]
+    y_today_pred_cal = ir.transform(y_today_pred)
+    today_df['hr_probability'] = y_today_pred_cal
 
-    # Predict for today
-    st.write("Predicting HR probabilities for today (stacked + calibrated)...")
-    today_preds = []
-    for name, model in base_models:
-        try:
-            pred = model.predict_proba(X_today_scaled)[:,1]
-            today_preds.append(pred)
-        except Exception:
-            today_preds.append(np.zeros(X_today_scaled.shape[0]))
-    today_preds = np.vstack(today_preds).T
-    meta_today_pred = meta_lr.predict_proba(today_preds)[:,1]
-    calibrated_today_pred = ir.transform(meta_today_pred)
-    today_df['hr_probability'] = calibrated_today_pred
-
-    # === Overlay/Postprocessing ===
+    # ==== APPLY OVERLAY SCORING ====
     st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
-    today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-    today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+    if 'hr_probability' in today_df.columns:
+        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
+        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+    else:
+        today_df['final_hr_probability'] = today_df['hr_probability']
 
-    # ==== LIVE DIAGNOSTICS ====
-    st.markdown("## 🔍 Feature Diagnostics")
-    st.write("Feature count:", len(feature_cols))
-    st.write("Top 30 Feature Names (post-engineering):")
-    st.write(feature_cols[:30])
-
-    # === Leaderboard, Hit Rate Tracking ===
+    # ==== TOP 10 PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
@@ -300,22 +306,16 @@ if event_file is not None and today_file is not None:
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
+    st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
     leaderboard_top10 = leaderboard.head(10)
-    st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (World Class Deep Research)**")
     st.dataframe(leaderboard_top10, use_container_width=True)
+
     if len(leaderboard) > 10:
         gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard.loc[10, "final_hr_probability"]
         st.markdown(f"**Confidence gap between Top 10/11:** `{gap:.4f}`")
-
-    # Save/track Top-10 hit rate (user adds today's actuals)
-    if "actual_hr" in today_df.columns:
-        top10_actuals = today_df.loc[leaderboard_top10.index, "actual_hr"]
-        hits = top10_actuals.sum()
-        st.markdown(f"### 🎯 **Today's Top-10 Hits: {int(hits)}/10**")
     else:
-        st.markdown("*Upload your actual HR column for hit tracking!*")
+        st.markdown("**Confidence gap:** (less than 11 players in leaderboard)")
 
-    # Download buttons
     st.download_button(
         "⬇️ Download Full Prediction CSV",
         data=today_df.to_csv(index=False),
@@ -326,11 +326,6 @@ if event_file is not None and today_file is not None:
         data=leaderboard_top10.to_csv(index=False),
         file_name="top10_leaderboard.csv"
     )
-
-    # Validation scores (meta-learner)
-    auc = roc_auc_score(y_val, meta_val_pred)
-    ll = log_loss(y_val, meta_val_pred)
-    st.success(f"Validation AUC (Meta-Stacked, Calibrated): **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
