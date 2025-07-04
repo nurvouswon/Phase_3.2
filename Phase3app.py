@@ -312,16 +312,16 @@ if event_file is not None and today_file is not None:
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
     # Top 10 + precision/confidence gap display
-    st.markdown("### 🏆 **Top 10 Precision HR Leaderboard (Deep Calibrated)**")
-    leaderboard_top10 = leaderboard.head(10)
-    st.dataframe(leaderboard_top10, use_container_width=True)
+    st.markdown("### 🏆 **Top 30 Precision HR Leaderboard (Deep Calibrated)**")
+    leaderboard_top30 = leaderboard.head(30)
+    st.dataframe(leaderboard_top30, use_container_width=True)
 
     # Confidence gap: drop-off between #10 and #11
-    if len(leaderboard) > 10:
-        gap = leaderboard.loc[9, "final_hr_probability"] - leaderboard.loc[10, "final_hr_probability"]
-        st.markdown(f"**Confidence gap between Top 10/11:** `{gap:.4f}`")
+    if len(leaderboard) > 30:
+        gap = leaderboard.loc[29, "final_hr_probability"] - leaderboard.loc[30, "final_hr_probability"]
+        st.markdown(f"**Confidence gap between Top 30/31:** `{gap:.4f}`")
     else:
-        st.markdown("**Confidence gap:** (less than 11 players in leaderboard)")
+        st.markdown("**Confidence gap:** (less than 31 players in leaderboard)")
 
     # Download full leaderboard and prediction CSVs
     st.download_button(
