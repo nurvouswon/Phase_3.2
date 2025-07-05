@@ -6,6 +6,7 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
@@ -161,26 +162,12 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
-    st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
-
-    clust_thresh = st.slider(
-        "One-Feature Clustering Correlation Threshold",
-        min_value=0.85, max_value=1.0, value=0.95, step=0.01
-    )
-
+    # === Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-    st.write(f"Number of initial features: {len(feature_cols)}")
-
-    X_full = event_df[feature_cols].fillna(0)
-    corr_matrix = X_full.corr().abs()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
-    feature_cols = [col for col in feature_cols if col not in to_drop]
-    st.write(f"Features retained after clustering: {len(feature_cols)}")
-    st.write(feature_cols)
+    st.write(f"Number of features in both event/today: {len(feature_cols)}")
+    st.write(f"Features being used: {feature_cols}")
 
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
@@ -191,14 +178,26 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    st.write("Splitting for validation and scaling...")
+    # ==== PCA Dimensionality Reduction Option ====
+    st.markdown("## 🧬 PCA Feature Reduction (Deep Research)")
+    st.info("Reduce feature space with PCA to minimize redundancy/correlation. Choose variance to retain:")
+    pca_var = st.slider("PCA: Variance to retain (%)", min_value=80, max_value=100, value=95, step=1) / 100.0
+
+    # Scale before PCA (best practice)
+    scaler_pre_pca = StandardScaler()
+    X_scaled = scaler_pre_pca.fit_transform(X)
+    X_today_scaled = scaler_pre_pca.transform(X_today)
+
+    # Fit PCA on TRAIN ONLY
+    pca = PCA(n_components=pca_var, svd_solver='full', random_state=42)
+    X_pca = pca.fit_transform(X_scaled)
+    X_today_pca = pca.transform(X_today_scaled)
+    st.write(f"Original features: {X.shape[1]}. Features after PCA: {X_pca.shape[1]}.")
+
+    # === Train/test split on reduced features
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X_pca, y, test_size=0.2, random_state=42, stratify=y
     )
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today)
 
     # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
@@ -216,45 +215,39 @@ if event_file is not None and today_file is not None:
     models_for_ensemble = []
     importances = {}
     try:
-        xgb_clf.fit(X_train_scaled, y_train)
+        xgb_clf.fit(X_train, y_train)
         models_for_ensemble.append(('xgb', xgb_clf))
         model_status.append('XGB OK')
-        importances['XGB'] = xgb_clf.feature_importances_
     except Exception as e:
         st.warning(f"XGBoost failed: {e}")
     try:
-        lgb_clf.fit(X_train_scaled, y_train)
+        lgb_clf.fit(X_train, y_train)
         models_for_ensemble.append(('lgb', lgb_clf))
         model_status.append('LGB OK')
-        importances['LGB'] = lgb_clf.feature_importances_
     except Exception as e:
         st.warning(f"LightGBM failed: {e}")
     try:
-        cat_clf.fit(X_train_scaled, y_train)
+        cat_clf.fit(X_train, y_train)
         models_for_ensemble.append(('cat', cat_clf))
         model_status.append('CatBoost OK')
-        importances['CatBoost'] = cat_clf.feature_importances_
     except Exception as e:
         st.warning(f"CatBoost failed: {e}")
     try:
-        rf_clf.fit(X_train_scaled, y_train)
+        rf_clf.fit(X_train, y_train)
         models_for_ensemble.append(('rf', rf_clf))
         model_status.append('RF OK')
-        importances['RF'] = rf_clf.feature_importances_
     except Exception as e:
         st.warning(f"RandomForest failed: {e}")
     try:
-        gb_clf.fit(X_train_scaled, y_train)
+        gb_clf.fit(X_train, y_train)
         models_for_ensemble.append(('gb', gb_clf))
         model_status.append('GB OK')
-        importances['GB'] = gb_clf.feature_importances_
     except Exception as e:
         st.warning(f"GBM failed: {e}")
     try:
-        lr_clf.fit(X_train_scaled, y_train)
+        lr_clf.fit(X_train, y_train)
         models_for_ensemble.append(('lr', lr_clf))
         model_status.append('LR OK')
-        importances['LR'] = np.abs(lr_clf.coef_[0])
     except Exception as e:
         st.warning(f"LogReg failed: {e}")
 
@@ -265,28 +258,11 @@ if event_file is not None and today_file is not None:
 
     st.write("Fitting ensemble (soft voting)...")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    ensemble.fit(X_train_scaled, y_train)
-
-    # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
-    st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
-    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
-    if tree_keys:
-        tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
-        import_df = pd.DataFrame({
-            "feature": X.columns,
-            "importance": tree_importances
-        }).sort_values("importance", ascending=False)
-        st.dataframe(import_df.head(30), use_container_width=True)
-        fig, ax = plt.subplots(figsize=(7,5))
-        ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
-        ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
-        st.pyplot(fig)
-    else:
-        st.warning("Tree model feature importances not available.")
+    ensemble.fit(X_train, y_train)
 
     # =========== VALIDATION ===========
     st.write("Validating (out-of-fold, not test-leak)...")
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
+    y_val_pred = ensemble.predict_proba(X_val)[:,1]
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
@@ -297,7 +273,7 @@ if event_file is not None and today_file is not None:
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
     # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
-    y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
+    y_today_pred = ensemble.predict_proba(X_today_pca)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
@@ -327,10 +303,10 @@ if event_file is not None and today_file is not None:
     for name in debug_names:
         st.write(f"{name} - Raw features:", today_df[today_df['player_name'] == name])
 
-    st.markdown("## 🐞 Debug: Model Input Vector (X_today)")
+    st.markdown("## 🐞 Debug: Model Input Vector (X_today_pca)")
     for name in debug_names:
         ix = today_df["player_name"] == name
-        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else feature_cols))
+        st.write(f"{name} - X_today_pca input:", pd.DataFrame(X_today_pca[ix], columns=[f"PC{i+1}" for i in range(X_today_pca.shape[1])]))
 
     st.markdown("## 🐞 Debug: Model Output Probabilities")
     for name in debug_names:
@@ -340,7 +316,7 @@ if event_file is not None and today_file is not None:
     # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
 
-    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
+    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated, PCA)**")
     leaderboard_top = leaderboard.head(top_n)
     st.dataframe(leaderboard_top, use_container_width=True)
 
