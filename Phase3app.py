@@ -166,7 +166,7 @@ if event_file is not None and today_file is not None:
 
     clust_thresh = st.slider(
         "One-Feature Clustering Correlation Threshold",
-        min_value=0.85, max_value=0.99, value=0.95, step=0.01
+        min_value=0.85, max_value=1.0, value=0.95, step=0.01
     )
 
     feat_cols_train = set(get_valid_feature_cols(event_df))
