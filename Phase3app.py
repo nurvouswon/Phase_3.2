@@ -87,12 +87,23 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
+
+def one_feature_per_corr_cluster(df, features, threshold=0.95):
+    """
+    Returns a list of features, keeping only one per cluster of highly correlated (> threshold).
+    """
+    X = df[features].fillna(-1)
+    corr_matrix = X.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    to_drop = [col for col in upper.columns if any(upper[col] > threshold)]
+    kept = [col for col in features if col not in to_drop]
+    return kept
 
 # ==== GAME DAY OVERLAY MULTIPLIERS ====
 def overlay_multiplier(row):
@@ -161,12 +172,18 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    # Only keep features present in BOTH event and today sets (intersection)
+    # ==== Only keep features present in BOTH event and today sets (intersection) ====
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
+
     st.write(f"Number of features in both event/today: {len(feature_cols)}")
-    st.write(f"Features being used: {feature_cols}")
+    st.write(f"Features BEFORE clustering: {feature_cols}")
+
+    # ---- One-feature-per-correlation-cluster (95% threshold) ----
+    feature_cols = one_feature_per_corr_cluster(event_df, feature_cols, threshold=0.95)
+    st.write(f"Features AFTER one-feature-per-cluster (corr>0.95): {len(feature_cols)}")
+    st.write(feature_cols)
 
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
