@@ -144,7 +144,7 @@ def cluster_meta_features(X_df, n_clusters=10):
         n_clusters = 1
     # Transpose so each feature is a "sample"
     X_T = X_var.T
-    cluster = AgglomerativeClustering(n_clusters=n_clusters, affinity='euclidean', linkage='ward')
+    cluster = AgglomerativeClustering(n_clusters=n_clusters, metric='euclidean', linkage='ward')
     cluster_labels = cluster.fit_predict(X_T)
     # Build meta-feature: mean of each cluster group, for every row in X_df
     meta_X = pd.DataFrame(
