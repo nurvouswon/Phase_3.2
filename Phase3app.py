@@ -11,6 +11,7 @@ import lightgbm as lgb
 import catboost as cb
 import matplotlib.pyplot as plt
 from sklearn.isotonic import IsotonicRegression
+from sklearn.decomposition import PCA
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -163,17 +164,11 @@ if event_file is not None and today_file is not None:
 
     # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
     st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
-
-    clust_thresh = st.slider(
-        "One-Feature Clustering Correlation Threshold",
-        min_value=0.85, max_value=1.0, value=0.95, step=0.01
-    )
-
+    clust_thresh = 0.99  # FIXED threshold, no slider
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of initial features: {len(feature_cols)}")
-
     X_full = event_df[feature_cols].fillna(0)
     corr_matrix = X_full.corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
@@ -200,6 +195,14 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
+    # ==== PCA (Deep Research Best Practice) ====
+    st.markdown("## 🧬 PCA: Final Filter Before Modeling (95% Variance Kept)")
+    pca = PCA(n_components=0.95, random_state=42)
+    X_train_pca = pca.fit_transform(X_train_scaled)
+    X_val_pca = pca.transform(X_val_scaled)
+    X_today_pca = pca.transform(X_today_scaled)
+    st.write(f"PCA reduced features to: {X_train_pca.shape[1]}")
+
     # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
@@ -216,45 +219,39 @@ if event_file is not None and today_file is not None:
     models_for_ensemble = []
     importances = {}
     try:
-        xgb_clf.fit(X_train_scaled, y_train)
+        xgb_clf.fit(X_train_pca, y_train)
         models_for_ensemble.append(('xgb', xgb_clf))
         model_status.append('XGB OK')
-        importances['XGB'] = xgb_clf.feature_importances_
     except Exception as e:
         st.warning(f"XGBoost failed: {e}")
     try:
-        lgb_clf.fit(X_train_scaled, y_train)
+        lgb_clf.fit(X_train_pca, y_train)
         models_for_ensemble.append(('lgb', lgb_clf))
         model_status.append('LGB OK')
-        importances['LGB'] = lgb_clf.feature_importances_
     except Exception as e:
         st.warning(f"LightGBM failed: {e}")
     try:
-        cat_clf.fit(X_train_scaled, y_train)
+        cat_clf.fit(X_train_pca, y_train)
         models_for_ensemble.append(('cat', cat_clf))
         model_status.append('CatBoost OK')
-        importances['CatBoost'] = cat_clf.feature_importances_
     except Exception as e:
         st.warning(f"CatBoost failed: {e}")
     try:
-        rf_clf.fit(X_train_scaled, y_train)
+        rf_clf.fit(X_train_pca, y_train)
         models_for_ensemble.append(('rf', rf_clf))
         model_status.append('RF OK')
-        importances['RF'] = rf_clf.feature_importances_
     except Exception as e:
         st.warning(f"RandomForest failed: {e}")
     try:
-        gb_clf.fit(X_train_scaled, y_train)
+        gb_clf.fit(X_train_pca, y_train)
         models_for_ensemble.append(('gb', gb_clf))
         model_status.append('GB OK')
-        importances['GB'] = gb_clf.feature_importances_
     except Exception as e:
         st.warning(f"GBM failed: {e}")
     try:
-        lr_clf.fit(X_train_scaled, y_train)
+        lr_clf.fit(X_train_pca, y_train)
         models_for_ensemble.append(('lr', lr_clf))
         model_status.append('LR OK')
-        importances['LR'] = np.abs(lr_clf.coef_[0])
     except Exception as e:
         st.warning(f"LogReg failed: {e}")
 
@@ -265,28 +262,14 @@ if event_file is not None and today_file is not None:
 
     st.write("Fitting ensemble (soft voting)...")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    ensemble.fit(X_train_scaled, y_train)
+    ensemble.fit(X_train_pca, y_train)
 
     # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
-    st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
-    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
-    if tree_keys:
-        tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
-        import_df = pd.DataFrame({
-            "feature": X.columns,
-            "importance": tree_importances
-        }).sort_values("importance", ascending=False)
-        st.dataframe(import_df.head(30), use_container_width=True)
-        fig, ax = plt.subplots(figsize=(7,5))
-        ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
-        ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
-        st.pyplot(fig)
-    else:
-        st.warning("Tree model feature importances not available.")
+    st.warning("Feature importances are not available when using PCA. If you need interpretability, run the model without PCA.")
 
     # =========== VALIDATION ===========
     st.write("Validating (out-of-fold, not test-leak)...")
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
+    y_val_pred = ensemble.predict_proba(X_val_pca)[:,1]
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
@@ -297,7 +280,7 @@ if event_file is not None and today_file is not None:
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
     # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
-    y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
+    y_today_pred = ensemble.predict_proba(X_today_pca)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
@@ -319,23 +302,6 @@ if event_file is not None and today_file is not None:
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
-
-    # Show debug: Print stats for 3 players at every step
-    debug_names = ["Agustin Ramirez", "Matt Wallner", "Trenton Brooks"]
-
-    st.markdown("## 🐞 Debug: Raw Stats from today_df")
-    for name in debug_names:
-        st.write(f"{name} - Raw features:", today_df[today_df['player_name'] == name])
-
-    st.markdown("## 🐞 Debug: Model Input Vector (X_today)")
-    for name in debug_names:
-        ix = today_df["player_name"] == name
-        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else feature_cols))
-
-    st.markdown("## 🐞 Debug: Model Output Probabilities")
-    for name in debug_names:
-        prob = today_df.loc[today_df['player_name'] == name, "hr_probability"].values
-        st.write(f"{name} - hr_probability:", prob)
 
     # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
