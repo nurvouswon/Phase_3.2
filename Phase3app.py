@@ -163,24 +163,48 @@ if event_file is not None and today_file is not None:
 
     # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
     st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group (corr>0.97)")
-    # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of initial features: {len(feature_cols)}")
 
-    # Build a DataFrame with only the feature columns, drop NaNs
+    # [1] Build a DataFrame with only the feature columns, drop NaNs
     X_full = event_df[feature_cols].fillna(0)
     corr_matrix = X_full.corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    # [2] Cluster: For every correlated group (corr > 0.97), pick the first one
     to_drop = [column for column in upper.columns if any(upper[column] > 0.97)]
-    feature_cols = [col for col in feature_cols if col not in to_drop]
-    st.write(f"Features retained after clustering: {len(feature_cols)}")
-    st.write(feature_cols)
+    feature_cols_cluster = [col for col in feature_cols if col not in to_drop]
+    st.write(f"Features retained after clustering: {len(feature_cols_cluster)}")
+    st.write(feature_cols_cluster)
 
-    X = clean_X(event_df[feature_cols])
+    # ========== UPGRADE: Add meta-features per cluster ==========
+    clusters = []
+    used = set()
+    for col in corr_matrix.columns:
+        if col not in used:
+            group = corr_matrix.index[(corr_matrix[col] > 0.97) & (corr_matrix.index != col)].tolist()
+            group = [col] + group
+            for g in group: used.add(g)
+            clusters.append(group)
+    st.write(f"Number of feature clusters: {len(clusters)}")
+
+    def build_cluster_meta(df, clusters):
+        meta = pd.DataFrame(index=df.index)
+        for i, cluster in enumerate(clusters):
+            meta[f"cluster_{i}_mean"] = df[cluster].mean(axis=1)
+            meta[f"cluster_{i}_std"] = df[cluster].std(axis=1)
+        return meta
+
+    X_rep = event_df[feature_cols_cluster].fillna(0)
+    X_meta = build_cluster_meta(event_df, clusters)
+    X = pd.concat([X_rep, X_meta], axis=1)
+
+    X_today_rep = today_df[feature_cols_cluster].fillna(0)
+    X_today_meta = build_cluster_meta(today_df, clusters)
+    X_today = pd.concat([X_today_rep, X_today_meta], axis=1)
+
     y = event_df[target_col]
-    X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
@@ -326,7 +350,7 @@ if event_file is not None and today_file is not None:
     st.markdown("## 🐞 Debug: Model Input Vector (X_today)")
     for name in debug_names:
         ix = today_df["player_name"] == name
-        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else feature_cols))
+        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else X.columns))
 
     st.markdown("## 🐞 Debug: Model Output Probabilities")
     for name in debug_names:
