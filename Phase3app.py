@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
@@ -11,6 +11,7 @@ import lightgbm as lgb
 import catboost as cb
 import matplotlib.pyplot as plt
 from sklearn.isotonic import IsotonicRegression
+from xgboost import XGBRegressor
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -127,7 +128,7 @@ def overlay_multiplier(row):
 
 # ==== FEATURE ENGINEERING BLOCK ====
 def feature_engineering(df):
-    # ====== DELTA/DIFFERENCE FEATURES ======
+    # DELTA/DIFFERENCE FEATURES
     windows_short = [3, 5, 7]
     windows_long = [14, 20, 30, 60]
     stat_bases = [
@@ -141,7 +142,7 @@ def feature_engineering(df):
                 col_long = f"{stat}_{w_l}"
                 if col_short in df.columns and col_long in df.columns:
                     df[f"delta_{stat}_{w_s}_{w_l}"] = df[col_short] - df[col_long]
-    # ====== HOT STREAK FLAGS ======
+    # HOT STREAK FLAGS
     for stat in stat_bases:
         for w_s in windows_short:
             for w_l in windows_long:
@@ -149,12 +150,12 @@ def feature_engineering(df):
                 col_long = f"{stat}_{w_l}"
                 if col_short in df.columns and col_long in df.columns:
                     df[f"is_hot_{stat}_{w_s}_{w_l}"] = (df[col_short] > df[col_long]).astype(int)
-    # ====== INTERACTION FEATURES ======
+    # INTERACTION FEATURES
     for bstat in ['b_hr_per_pa_3', 'b_barrel_rate_3', 'b_slg_3', 'b_avg_exit_velo_3']:
         for pstat in ['p_hr_per_pa_3', 'p_barrel_rate_3', 'p_slg_3', 'p_avg_exit_velo_3']:
             if bstat in df.columns and pstat in df.columns:
                 df[f"{bstat}_X_{pstat}"] = df[bstat] * df[pstat]
-    # ====== OUTLIER CLIPPING ======
+    # OUTLIER CLIPPING
     for col in df.columns:
         if 'hr_per_pa' in col:
             df[col] = df[col].clip(0, 0.25)
@@ -163,16 +164,6 @@ def feature_engineering(df):
         if 'barrel_rate' in col or 'hard_hit_rate' in col or 'fb_rate' in col or 'pull_rate' in col:
             df[col] = df[col].clip(0, 1)
     return df
-
-# ==== PITCHER FILTER ====
-def is_probable_pitcher(row):
-    for prefix in ["p_", "pitcher_"]:
-        if row.get(f"{prefix}hr_per_pa_3", 0) == 0 and row.get(f"{prefix}barrel_rate_3", 0) == 0:
-            return True
-    name = str(row.get("player_name", "")).lower()
-    if "pitcher" in name:
-        return True
-    return False
 
 # ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
@@ -210,15 +201,15 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    # === Deep Research Feature Engineering ===
+    # Feature engineering
     event_df = feature_engineering(event_df)
     today_df = feature_engineering(today_df)
 
-    st.write("Skipping probable pitcher filter on today_df to avoid empty dataframe.")
-
+    # Keep only intersection of features
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
+
     st.write(f"Number of features in both event/today: {len(feature_cols)}")
     st.write(f"Features being used: {feature_cols}")
 
@@ -335,6 +326,7 @@ if event_file is not None and today_file is not None:
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+    # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
     y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
@@ -348,109 +340,108 @@ if event_file is not None and today_file is not None:
     else:
         today_df['final_hr_probability'] = today_df['hr_probability']
 
-    # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
+    # ==== TOP N PRECISION LEADERBOARD ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
     leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
+
     leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
+leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
+leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
-    # === SELECT TOP N FOR META-MODEL ===
-    top_n = 30
-    leaderboard_top = leaderboard.head(top_n).copy()
+# --- Top-N Pool for Meta-Modeling ---
+top_n = 30
+leaderboard_top = leaderboard.head(top_n).copy()
 
-    # === AUTO-SELECT TOP META-FEATURES ===
-    n_meta_features = min(15, len(import_df))  # Use up to top 15 features if available
-    auto_meta_features = list(import_df["feature"].head(n_meta_features))
-    meta_features = [f for f in auto_meta_features if f in leaderboard_top.columns]
-    # Always include "final_hr_probability"
-    if "final_hr_probability" not in meta_features:
-        meta_features = ["final_hr_probability"] + meta_features
-
-    st.markdown(f"### 🤖 Meta-Model Features Used: {meta_features}")
-
-    # === BUILD META-DATA ===
-    meta_X = leaderboard_top[meta_features].copy()
-
-    # Simulated ground truth: Top 10 as "1", rest as "0" (deep research best proxy when no true y available)
-    meta_y = (leaderboard_top["final_hr_probability"].rank(method="first", ascending=False) <= 10).astype(int)
-
-    # === META-STACKING: XGBOOST with 5-fold CV for Robustness ===
-    meta_preds = np.zeros(meta_X.shape[0])
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    meta_aucs = []
-    for train_idx, val_idx in skf.split(meta_X, meta_y):
-        xgb_meta = xgb.XGBClassifier(n_estimators=80, max_depth=3, learning_rate=0.09, use_label_encoder=False, eval_metric='logloss', verbosity=0)
-        xgb_meta.fit(meta_X.iloc[train_idx], meta_y.iloc[train_idx])
-        meta_preds[val_idx] = xgb_meta.predict_proba(meta_X.iloc[val_idx])[:,1]
-        try:
-            fold_auc = roc_auc_score(meta_y.iloc[val_idx], meta_preds[val_idx])
-            meta_aucs.append(fold_auc)
-        except Exception:
-            pass
-
-    leaderboard_top["meta_refined_prob"] = meta_preds
-    refined_leaderboard = leaderboard_top.sort_values("meta_refined_prob", ascending=False).reset_index(drop=True)
-    mean_auc = np.mean(meta_aucs) if meta_aucs else float("nan")
-    st.success(f"Meta-Stacked XGBoost 5-Fold CV ROC AUC: **{mean_auc:.4f}**")
-
-    # Show top meta-feature importances
-    xgb_meta_full = xgb.XGBClassifier(n_estimators=80, max_depth=3, learning_rate=0.09, use_label_encoder=False, eval_metric='logloss', verbosity=0)
-    xgb_meta_full.fit(meta_X, meta_y)
-    meta_imp_df = pd.DataFrame({
-        "meta_feature": meta_X.columns,
-        "importance": xgb_meta_full.feature_importances_
-    }).sort_values("importance", ascending=False)
-    with st.expander("Meta-Model (XGB) Feature Importances"):
-        st.dataframe(meta_imp_df)
-
-    # === SHOW REFINED LEADERBOARDS ===
-    st.markdown("### 🏅 **Refined Top 10 (Meta-XGB Stacking, Deep Research)**")
-    st.dataframe(refined_leaderboard.head(10), use_container_width=True)
-    st.markdown("### 🏅 **Refined Top 15**")
-    st.dataframe(refined_leaderboard.head(15), use_container_width=True)
-    st.markdown("### 🏅 **Refined Top 30**")
-    st.dataframe(refined_leaderboard, use_container_width=True)
-
-    st.markdown("#### ⬇️ Download Refined Leaderboards")
-    st.download_button(
-        "Download Refined Top 10 Leaderboard CSV",
-        data=refined_leaderboard.head(10).to_csv(index=False),
-        file_name="refined_top10_leaderboard.csv"
-    )
-    st.download_button(
-        "Download Refined Top 15 Leaderboard CSV",
-        data=refined_leaderboard.head(15).to_csv(index=False),
-        file_name="refined_top15_leaderboard.csv"
-    )
-    st.download_button(
-        "Download Refined Top 30 Leaderboard CSV",
-        data=refined_leaderboard.to_csv(index=False),
-        file_name="refined_top30_leaderboard.csv"
-    )
-
-    # Also show full initial leaderboard + download for auditability
-    st.markdown(f"### 🏆 **Original Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
-    st.dataframe(leaderboard_top, use_container_width=True)
-    if len(leaderboard) > top_n:
-        gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
-        st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
-    else:
-        st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
-
-    st.download_button(
-        f"⬇️ Download Full Prediction CSV",
-        data=today_df.to_csv(index=False),
-        file_name="today_hr_predictions.csv"
-    )
-    st.download_button(
-        f"⬇️ Download Top {top_n} Leaderboard CSV",
-        data=leaderboard_top.to_csv(index=False),
-        file_name=f"top{top_n}_leaderboard.csv"
-    )
-
+# ======== AUTO-SELECT TOP META FEATURES ========
+# Use top 15 most important features from the model (from the import_df above if available)
+n_meta_feats = 15
+# Attempt to grab top features from earlier importance DF if available
+if "import_df" in locals():
+    meta_features = import_df.head(n_meta_feats)["feature"].tolist()
 else:
-    st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
+    meta_features = [c for c in leaderboard_top.columns if c not in ("player_name", "hr_probability", "overlay_multiplier", "final_hr_probability") and leaderboard_top[c].dtype != "O"][:n_meta_feats]
+# Fallback if not enough features
+if len(meta_features) < n_meta_feats:
+    more_feats = [c for c in leaderboard_top.columns if c not in meta_features and leaderboard_top[c].dtype != "O"]
+    meta_features += more_feats[:n_meta_feats - len(meta_features)]
+meta_features = [f for f in meta_features if f in leaderboard_top.columns]
+st.write("Meta-model selected features:", meta_features)
+
+# ======== META-STACKED MODEL: XGBRegressor with KFold CV ========
+from xgboost import XGBRegressor
+from sklearn.model_selection import KFold
+
+meta_X = leaderboard_top[meta_features].copy()
+meta_y = 1.0 - (leaderboard_top["final_hr_probability"].rank(method="first", ascending=False) - 1) / (len(leaderboard_top) - 1)
+meta_pred = np.zeros(len(meta_X))
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+for train_idx, test_idx in kf.split(meta_X):
+    xtr, xte = meta_X.iloc[train_idx], meta_X.iloc[test_idx]
+    ytr = meta_y.iloc[train_idx]
+    meta_model = XGBRegressor(n_estimators=60, max_depth=3, learning_rate=0.14, subsample=0.85, colsample_bytree=0.9, random_state=42)
+    meta_model.fit(xtr, ytr)
+    meta_pred[test_idx] = meta_model.predict(xte)
+leaderboard_top["meta_refined_prob"] = meta_pred
+
+# Fit final meta-model for feature importances
+meta_model_full = XGBRegressor(n_estimators=60, max_depth=3, learning_rate=0.14, subsample=0.85, colsample_bytree=0.9, random_state=42)
+meta_model_full.fit(meta_X, meta_y)
+
+# Sort by meta-model result
+refined_leaderboard = leaderboard_top.sort_values("meta_refined_prob", ascending=False).reset_index(drop=True)
+
+st.markdown("### 🏅 **Refined Top 10 (Meta-Model Stacking, XGBRegressor, Deep Research)**")
+st.dataframe(refined_leaderboard.head(10), use_container_width=True)
+st.markdown("### 🏅 **Refined Top 15**")
+st.dataframe(refined_leaderboard.head(15), use_container_width=True)
+st.markdown("### 🏅 **Refined Top 30**")
+st.dataframe(refined_leaderboard, use_container_width=True)
+
+st.markdown("#### ⬇️ Download Refined Leaderboards")
+st.download_button(
+    "Download Refined Top 10 Leaderboard CSV",
+    data=refined_leaderboard.head(10).to_csv(index=False),
+    file_name="refined_top10_leaderboard.csv"
+)
+st.download_button(
+    "Download Refined Top 15 Leaderboard CSV",
+    data=refined_leaderboard.head(15).to_csv(index=False),
+    file_name="refined_top15_leaderboard.csv"
+)
+st.download_button(
+    "Download Refined Top 30 Leaderboard CSV",
+    data=refined_leaderboard.to_csv(index=False),
+    file_name="refined_top30_leaderboard.csv"
+)
+
+# Show meta-model feature importances
+with st.expander("Meta-Model (XGBRegressor) Feature Importances"):
+    meta_imp_df = pd.DataFrame({
+        "feature": meta_features,
+        "importance": meta_model_full.feature_importances_
+    }).sort_values("importance", ascending=False)
+    st.dataframe(meta_imp_df)
+
+# Also show the classic top_n leaderboard for comparison
+st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
+st.dataframe(leaderboard_top, use_container_width=True)
+
+if len(leaderboard) > top_n:
+    gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
+    st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
+else:
+    st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
+
+st.download_button(
+    f"⬇️ Download Full Prediction CSV",
+    data=today_df.to_csv(index=False),
+    file_name="today_hr_predictions.csv"
+)
+st.download_button(
+    f"⬇️ Download Top {top_n} Leaderboard CSV",
+    data=leaderboard_top.to_csv(index=False),
+    file_name=f"top{top_n}_leaderboard.csv"
+)
