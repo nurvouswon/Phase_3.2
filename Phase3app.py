@@ -87,7 +87,7 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
@@ -181,35 +181,46 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    # ==== CLUSTERING META-FEATURES BLOCK ====
-    from scipy.cluster.hierarchy import linkage, fcluster
-    from scipy.spatial.distance import squareform
+    # === CLUSTERING UPGRADE (meta-feature engineering) ===
+    st.markdown("## 🧩 Feature Clustering & Meta-Features")
 
     def cluster_and_build_meta_features(X, X_today, num_clusters=20):
+        # Drop constant/all-NaN/non-finite columns before clustering
+        drop_cols = []
+        for col in X.columns:
+            if X[col].isnull().all() or X[col].std() == 0 or not np.isfinite(X[col]).all():
+                drop_cols.append(col)
+        if drop_cols:
+            st.warning(f"Dropping {len(drop_cols)} constant/all-NaN/non-finite features before clustering: {drop_cols[:10]}{'...' if len(drop_cols) > 10 else ''}")
+            X = X.drop(columns=drop_cols)
+            X_today = X_today.drop(columns=drop_cols, errors="ignore")
+        # Compute abs correlation matrix and cluster
         corr = X.corr().abs()
         distance_matrix = 1 - corr
+        distance_matrix = distance_matrix.fillna(0)
+        from scipy.spatial.distance import squareform
+        from scipy.cluster.hierarchy import linkage, fcluster
         dist_array = squareform(distance_matrix.values, checks=False)
+        num_clusters = min(num_clusters, len(X.columns))
         Z = linkage(dist_array, method='average')
         cluster_labels = fcluster(Z, num_clusters, criterion='maxclust')
         cluster_map = dict(zip(X.columns, cluster_labels))
-
+        # Create meta-features: mean per cluster
         meta_X = pd.DataFrame(index=X.index)
         meta_X_today = pd.DataFrame(index=X_today.index)
-        for cid in np.unique(cluster_labels):
-            members = [feat for feat, cl in cluster_map.items() if cl == cid]
-            meta_X[f'cluster_{cid}_mean'] = X[members].mean(axis=1)
-            meta_X_today[f'cluster_{cid}_mean'] = X_today[members].mean(axis=1)
+        for k in np.unique(cluster_labels):
+            cluster_features = [col for col, lab in cluster_map.items() if lab == k]
+            meta_X[f"cluster_{k}_mean"] = X[cluster_features].mean(axis=1)
+            meta_X_today[f"cluster_{k}_mean"] = X_today[cluster_features].mean(axis=1)
+        st.write(f"Feature clusters created: {meta_X.shape[1]}")
         return meta_X, meta_X_today, cluster_map
 
     num_clusters = min(20, len(feature_cols))
     meta_X, meta_X_today, cluster_map = cluster_and_build_meta_features(X, X_today, num_clusters=num_clusters)
     X = meta_X
     X_today = meta_X_today
+    st.write(f"Meta-feature columns for modeling: {list(X.columns)}")
 
-    st.write(f"Meta-feature clustering complete: {num_clusters} clusters created.")
-    st.write("Meta-feature columns:", list(X.columns))
-
-    # [ ... continue as before ... ]
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
@@ -286,6 +297,23 @@ if event_file is not None and today_file is not None:
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
     ensemble.fit(X_train_scaled, y_train)
 
+    # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
+    st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
+    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
+    if tree_keys:
+        tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
+        import_df = pd.DataFrame({
+            "feature": X.columns,
+            "importance": tree_importances
+        }).sort_values("importance", ascending=False)
+        st.dataframe(import_df.head(30), use_container_width=True)
+        fig, ax = plt.subplots(figsize=(7,5))
+        ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
+        ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
+        st.pyplot(fig)
+    else:
+        st.warning("Tree model feature importances not available.")
+
     # =========== VALIDATION ===========
     st.write("Validating (out-of-fold, not test-leak)...")
     y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
@@ -332,7 +360,7 @@ if event_file is not None and today_file is not None:
     st.markdown("## 🐞 Debug: Model Input Vector (X_today)")
     for name in debug_names:
         ix = today_df["player_name"] == name
-        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else X_today.columns))
+        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else X.columns))
 
     st.markdown("## 🐞 Debug: Model Output Probabilities")
     for name in debug_names:
