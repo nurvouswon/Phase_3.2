@@ -161,16 +161,22 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    # === Deep Research Feature Engineering ===
-    # event_df = feature_engineering(event_df)
-    # today_df = feature_engineering(today_df)
-
+    # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
+    st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group (corr>0.97)")
     # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-    st.write(f"Number of features in both event/today: {len(feature_cols)}")
-    st.write(f"Features being used: {feature_cols}")
+    st.write(f"Number of initial features: {len(feature_cols)}")
+
+    # Build a DataFrame with only the feature columns, drop NaNs
+    X_full = event_df[feature_cols].fillna(0)
+    corr_matrix = X_full.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    to_drop = [column for column in upper.columns if any(upper[column] > 0.97)]
+    feature_cols = [col for col in feature_cols if col not in to_drop]
+    st.write(f"Features retained after clustering: {len(feature_cols)}")
+    st.write(feature_cols)
 
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
@@ -180,46 +186,6 @@ if event_file is not None and today_file is not None:
 
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
-
-    # === CLUSTERING UPGRADE (meta-feature engineering) ===
-    st.markdown("## 🧩 Feature Clustering & Meta-Features")
-
-    def cluster_and_build_meta_features(X, X_today, num_clusters=20):
-        # Drop constant/all-NaN/non-finite columns before clustering
-        drop_cols = []
-        for col in X.columns:
-            if X[col].isnull().all() or X[col].std() == 0 or not np.isfinite(X[col]).all():
-                drop_cols.append(col)
-        if drop_cols:
-            st.warning(f"Dropping {len(drop_cols)} constant/all-NaN/non-finite features before clustering: {drop_cols[:10]}{'...' if len(drop_cols) > 10 else ''}")
-            X = X.drop(columns=drop_cols)
-            X_today = X_today.drop(columns=drop_cols, errors="ignore")
-        # Compute abs correlation matrix and cluster
-        corr = X.corr().abs()
-        distance_matrix = 1 - corr
-        distance_matrix = distance_matrix.fillna(0)
-        from scipy.spatial.distance import squareform
-        from scipy.cluster.hierarchy import linkage, fcluster
-        dist_array = squareform(distance_matrix.values, checks=False)
-        num_clusters = min(num_clusters, len(X.columns))
-        Z = linkage(dist_array, method='average')
-        cluster_labels = fcluster(Z, num_clusters, criterion='maxclust')
-        cluster_map = dict(zip(X.columns, cluster_labels))
-        # Create meta-features: mean per cluster
-        meta_X = pd.DataFrame(index=X.index)
-        meta_X_today = pd.DataFrame(index=X_today.index)
-        for k in np.unique(cluster_labels):
-            cluster_features = [col for col, lab in cluster_map.items() if lab == k]
-            meta_X[f"cluster_{k}_mean"] = X[cluster_features].mean(axis=1)
-            meta_X_today[f"cluster_{k}_mean"] = X_today[cluster_features].mean(axis=1)
-        st.write(f"Feature clusters created: {meta_X.shape[1]}")
-        return meta_X, meta_X_today, cluster_map
-
-    num_clusters = min(20, len(feature_cols))
-    meta_X, meta_X_today, cluster_map = cluster_and_build_meta_features(X, X_today, num_clusters=num_clusters)
-    X = meta_X
-    X_today = meta_X_today
-    st.write(f"Meta-feature columns for modeling: {list(X.columns)}")
 
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
@@ -360,7 +326,7 @@ if event_file is not None and today_file is not None:
     st.markdown("## 🐞 Debug: Model Input Vector (X_today)")
     for name in debug_names:
         ix = today_df["player_name"] == name
-        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else X.columns))
+        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else feature_cols))
 
     st.markdown("## 🐞 Debug: Model Output Probabilities")
     for name in debug_names:
