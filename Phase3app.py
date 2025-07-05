@@ -135,15 +135,22 @@ def cluster_one_feature(X_df, threshold=0.97):
 
 def cluster_meta_features(X_df, n_clusters=10):
     from sklearn.cluster import AgglomerativeClustering
-    cols_var = X_df.columns[X_df.std() > 1e-5]
-    X_var = X_df[cols_var]
+
+    # Drop all-NaN columns (if any)
+    X_var = X_df.loc[:, X_df.std() > 1e-6]
+    X_var = X_var.fillna(0).astype(float)   # Replace any NaN with 0 (or you can use .mean())
     n_clusters = min(n_clusters, len(X_var.columns))
     if n_clusters < 1:
         n_clusters = 1
-    X_T = X_var.T.values  # THE KEY FIX
+
+    # AgglomerativeClustering expects shape (n_features, n_samples) so transpose, then values for numpy array
+    X_T = X_var.T.values
+    # This should be (n_features, n_samples). If your features are less than n_clusters, set n_clusters=1
+
     cluster = AgglomerativeClustering(n_clusters=n_clusters, metric='euclidean', linkage='ward')
     cluster_labels = cluster.fit_predict(X_T)
-    # Build meta-feature: mean of each cluster group, for every row in X_var
+
+    # For each cluster, take the mean of the features in that cluster, per sample (row)
     meta_X = pd.DataFrame(
         {f"cluster_{i}": X_var.iloc[:, cluster_labels == i].mean(axis=1)
          for i in range(n_clusters)},
