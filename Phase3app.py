@@ -94,7 +94,7 @@ def nan_inf_check(df, name):
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
-def one_feature_per_corr_cluster(df, features, threshold=0.99):
+def one_feature_per_corr_cluster(df, features, threshold=0.98):
     """
     Returns a list of features, keeping only one per cluster of highly correlated (> threshold).
     """
@@ -180,9 +180,9 @@ if event_file is not None and today_file is not None:
     st.write(f"Number of features in both event/today: {len(feature_cols)}")
     st.write(f"Features BEFORE clustering: {feature_cols}")
 
-    # ---- One-feature-per-correlation-cluster (99% threshold) ----
-    feature_cols = one_feature_per_corr_cluster(event_df, feature_cols, threshold=0.99)
-    st.write(f"Features AFTER one-feature-per-cluster (corr>0.99): {len(feature_cols)}")
+    # ---- One-feature-per-correlation-cluster (98% threshold) ----
+    feature_cols = one_feature_per_corr_cluster(event_df, feature_cols, threshold=0.98)
+    st.write(f"Features AFTER one-feature-per-cluster (corr>0.98): {len(feature_cols)}")
     st.write(feature_cols)
 
     X = clean_X(event_df[feature_cols])
