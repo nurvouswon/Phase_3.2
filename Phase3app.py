@@ -165,6 +165,7 @@ if event_file is not None and today_file is not None:
     st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
     clust_thresh = 0.99  # Fixed threshold, no slider
 
+    # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
@@ -175,6 +176,8 @@ if event_file is not None and today_file is not None:
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
     feature_cols = [col for col in feature_cols if col not in to_drop]
+
+    # FINAL INTERSECTION with today's columns to ensure no KeyError
     feature_cols = [col for col in feature_cols if col in today_df.columns]
     st.write(f"Features retained after clustering & intersection: {len(feature_cols)}")
     st.write(feature_cols)
@@ -292,30 +295,41 @@ if event_file is not None and today_file is not None:
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-
     # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
     y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
+    # ==== APPLY OVERLAY SCORING ====
+    st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
+    if 'hr_probability' in today_df.columns:
+        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
+        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+    else:
+        today_df['final_hr_probability'] = today_df['hr_probability']
+
     # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability"]
+    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
 
-    leaderboard = today_df[leaderboard_cols].sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
+    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
+    # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
+
     st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
     leaderboard_top = leaderboard.head(top_n)
     st.dataframe(leaderboard_top, use_container_width=True)
 
     # Confidence gap: drop-off between last included and next
     if len(leaderboard) > top_n:
-        gap = leaderboard.loc[top_n - 1, "hr_probability"] - leaderboard.loc[top_n, "hr_probability"]
+        gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
         st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
     else:
         st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
