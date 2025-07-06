@@ -10,3 +10,4 @@ optuna
 matplotlib
 fastparquet
 pyarrow
+scipy
