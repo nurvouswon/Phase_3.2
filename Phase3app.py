@@ -340,7 +340,7 @@ if event_file is not None and today_file is not None:
     # ==== APPLY META-RANKER TO TODAY'S TOP 30 ====
     st.write("🛠️ Applying meta-ranker to today's leaderboard...")
     leaderboard_top = leaderboard_today.head(30).copy()
-     X_top_meta = leaderboard_top[meta_features].fillna(-1)
+    X_top_meta = leaderboard_top[meta_features].fillna(-1)
     meta_probs = meta_rerank.predict_proba(X_top_meta)[:, 1]
     leaderboard_top['meta_rerank_prob'] = meta_probs
 
