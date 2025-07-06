@@ -7,7 +7,6 @@ lightgbm
 catboost
 shap
 optuna
-alibi-detect
 matplotlib
 fastparquet
 pyarrow
