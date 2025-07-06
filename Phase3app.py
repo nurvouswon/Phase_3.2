@@ -64,6 +64,18 @@ def get_valid_feature_cols(df, drop=None):
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
 
+def drop_high_na_low_var(df, thresh_na=1.0, thresh_var=0.0):
+    cols_to_drop = []
+    na_frac = df.isnull().mean()
+    low_var_cols = df.select_dtypes(include=[np.number]).columns[df.select_dtypes(include=[np.number]).std() < thresh_var]
+    for c in df.columns:
+        if na_frac.get(c, 0) > thresh_na:
+            cols_to_drop.append(c)
+        elif c in low_var_cols:
+            cols_to_drop.append(c)
+    df2 = df.drop(columns=cols_to_drop, errors="ignore")
+    return df2, cols_to_drop
+
 def downcast_df(df):
     float_cols = df.select_dtypes(include=['float'])
     int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
@@ -75,13 +87,43 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
-    st.write(f"DEBUG: {name} - Found {nans} NaNs and {infs} Infs")
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
+
+# ==== GAME DAY OVERLAY MULTIPLIERS ====
+def overlay_multiplier(row):
+    multiplier = 1.0
+    wind_col = 'wind_mph'
+    wind_dir_col = 'wind_dir_string'
+    if wind_col in row and wind_dir_col in row:
+        wind = row[wind_col]
+        wind_dir = str(row[wind_dir_col]).lower()
+        if pd.notnull(wind) and wind >= 10:
+            if 'out' in wind_dir:
+                multiplier *= 1.08
+            elif 'in' in wind_dir:
+                multiplier *= 0.93
+    temp_col = 'temp'
+    if temp_col in row and pd.notnull(row[temp_col]):
+        base_temp = 70
+        delta = row[temp_col] - base_temp
+        multiplier *= 1.03 ** (delta / 10)
+    humidity_col = 'humidity'
+    if humidity_col in row and pd.notnull(row[humidity_col]):
+        hum = row[humidity_col]
+        if hum > 60:
+            multiplier *= 1.02
+        elif hum < 40:
+            multiplier *= 0.98
+    park_hr_col = 'park_hr_rate'
+    if park_hr_col in row and pd.notnull(row[park_hr_col]):
+        pf = max(0.85, min(1.20, float(row[park_hr_col])))
+        multiplier *= pf
+    return multiplier
 
 # ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
@@ -114,29 +156,30 @@ if event_file is not None and today_file is not None:
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
 
-    st.write("DEBUG: hr_outcome class balance:")
     value_counts = event_df[target_col].value_counts(dropna=False).reset_index()
     value_counts.columns = [target_col, 'count']
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
     # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
-    st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group (thresh=0.99)")
-    clust_thresh = 0.99
+    st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
+    clust_thresh = 0.99  # Fixed threshold, no slider
+
+    # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of initial features: {len(feature_cols)}")
+
     X_full = event_df[feature_cols].fillna(0)
-    st.write("DEBUG: First 10 feature columns:")
-    st.write(feature_cols[:10])
-    st.write("DEBUG: Feature sums for train (first 10):")
-    st.write(X_full[feature_cols[:10]].sum())
     corr_matrix = X_full.corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
     feature_cols = [col for col in feature_cols if col not in to_drop]
-    st.write(f"Features retained after clustering: {len(feature_cols)}")
+
+    # FINAL INTERSECTION with today's columns to ensure no KeyError
+    feature_cols = [col for col in feature_cols if col in today_df.columns]
+    st.write(f"Features retained after clustering & intersection: {len(feature_cols)}")
     st.write(feature_cols)
 
     X = clean_X(event_df[feature_cols])
@@ -147,8 +190,6 @@ if event_file is not None and today_file is not None:
 
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
-    st.write("DEBUG: X shape:", X.shape)
-    st.write("DEBUG: X_today shape:", X_today.shape)
 
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
@@ -246,8 +287,6 @@ if event_file is not None and today_file is not None:
     # =========== VALIDATION ===========
     st.write("Validating (out-of-fold, not test-leak)...")
     y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
-    st.write("DEBUG: Raw HR probabilities for validation (first 20):")
-    st.write(y_val_pred[:20])
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
@@ -256,36 +295,46 @@ if event_file is not None and today_file is not None:
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-    st.write("DEBUG: Calibrated HR probabilities for validation (first 20):")
-    st.write(y_val_pred_cal[:20])
-
     # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
     y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
-    st.write("DEBUG: Calibrated HR probabilities for today (first 20):")
-    st.write(y_today_pred_cal[:20])
     today_df['hr_probability'] = y_today_pred_cal
 
+    # ==== APPLY OVERLAY SCORING ====
+    st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
+    if 'hr_probability' in today_df.columns:
+        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
+        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+    else:
+        today_df['final_hr_probability'] = today_df['hr_probability']
+
+    # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability"]
+    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
 
-    leaderboard = today_df[leaderboard_cols].sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
+    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
+    # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
+
     st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
     leaderboard_top = leaderboard.head(top_n)
     st.dataframe(leaderboard_top, use_container_width=True)
 
+    # Confidence gap: drop-off between last included and next
     if len(leaderboard) > top_n:
-        gap = leaderboard.loc[top_n - 1, "hr_probability"] - leaderboard.loc[top_n, "hr_probability"]
+        gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
         st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
     else:
         st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
 
+    # Download full leaderboard and prediction CSVs
     st.download_button(
         f"⬇️ Download Full Prediction CSV",
         data=today_df.to_csv(index=False),
