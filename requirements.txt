@@ -5,7 +5,9 @@ scikit-learn
 xgboost
 lightgbm
 catboost
-matplotlib
 shap
+optuna
+alibi-detect
+matplotlib
 fastparquet
 pyarrow
