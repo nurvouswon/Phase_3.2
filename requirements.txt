@@ -6,5 +6,6 @@ xgboost
 lightgbm
 catboost
 matplotlib
-pyarrow
+shap
 fastparquet
+pyarrow
