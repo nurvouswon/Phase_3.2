@@ -94,37 +94,6 @@ def nan_inf_check(df, name):
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
-# ==== GAME DAY OVERLAY MULTIPLIERS ====
-def overlay_multiplier(row):
-    multiplier = 1.0
-    wind_col = 'wind_mph'
-    wind_dir_col = 'wind_dir_string'
-    if wind_col in row and wind_dir_col in row:
-        wind = row[wind_col]
-        wind_dir = str(row[wind_dir_col]).lower()
-        if pd.notnull(wind) and wind >= 10:
-            if 'out' in wind_dir:
-                multiplier *= 1.08
-            elif 'in' in wind_dir:
-                multiplier *= 0.93
-    temp_col = 'temp'
-    if temp_col in row and pd.notnull(row[temp_col]):
-        base_temp = 70
-        delta = row[temp_col] - base_temp
-        multiplier *= 1.03 ** (delta / 10)
-    humidity_col = 'humidity'
-    if humidity_col in row and pd.notnull(row[humidity_col]):
-        hum = row[humidity_col]
-        if hum > 60:
-            multiplier *= 1.02
-        elif hum < 40:
-            multiplier *= 0.98
-    park_hr_col = 'park_hr_rate'
-    if park_hr_col in row and pd.notnull(row[park_hr_col]):
-        pf = max(0.85, min(1.20, float(row[park_hr_col])))
-        multiplier *= pf
-    return multiplier
-
 # ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
@@ -181,6 +150,31 @@ if event_file is not None and today_file is not None:
     feature_cols = [col for col in feature_cols if col in today_df.columns]
     st.write(f"Features retained after clustering & intersection: {len(feature_cols)}")
     st.write(feature_cols)
+
+    # === ADD FEATURE INTERACTIONS (PRO SECRET SAUCE) ===
+    def add_interactions(df):
+        # Add only if both cols exist!
+        combos = [
+            # Batter features
+            ('b_barrel_rate_7', 'b_pull_rate_7'),   # Barrel × Pull
+            ('b_hr_per_pa_3', 'park_hr_rate'),      # Recent HR × park HR rate
+            ('b_avg_exit_velo_7', 'b_barrel_rate_7'),
+            ('b_barrel_rate_7', 'b_fb_rate_7'),     # Barrel × Flyball
+            ('p_barrel_rate_7', 'park_hr_rate'),    # Pitcher barrel × park
+            # Pitcher/hitter combined
+            ('b_barrel_rate_7', 'p_barrel_rate_7'), # Hitter × pitcher barrels
+            # Add more as you wish!
+        ]
+        for a, b in combos:
+            if a in df.columns and b in df.columns:
+                df[f'{a}_x_{b}'] = df[a] * df[b]
+        return df
+
+    event_df = add_interactions(event_df)
+    today_df = add_interactions(today_df)
+    # Add these new columns if present!
+    new_feats = [c for c in event_df.columns if '_x_' in c and c in today_df.columns]
+    feature_cols += new_feats
 
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
@@ -301,24 +295,14 @@ if event_file is not None and today_file is not None:
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    # ==== APPLY OVERLAY SCORING ====
-    st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
-    if 'hr_probability' in today_df.columns:
-        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
-    else:
-        today_df['final_hr_probability'] = today_df['hr_probability']
-
     # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
+    leaderboard_cols += ["hr_probability"]
 
-    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
+    leaderboard = today_df[leaderboard_cols].sort_values("hr_probability", ascending=False).reset_index(drop=True)
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
     # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
@@ -329,7 +313,7 @@ if event_file is not None and today_file is not None:
 
     # Confidence gap: drop-off between last included and next
     if len(leaderboard) > top_n:
-        gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
+        gap = leaderboard.loc[top_n - 1, "hr_probability"] - leaderboard.loc[top_n, "hr_probability"]
         st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
     else:
         st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
