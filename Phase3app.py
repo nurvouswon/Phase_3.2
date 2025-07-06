@@ -196,6 +196,8 @@ if event_file is not None and today_file is not None:
     st.write(f"Number of initial features (incl. interactions): {len(feature_cols)}")
 
     X_full = event_df[feature_cols].fillna(0)
+    # Ensure all columns are numeric (object columns will be dropped)
+    X_full = X_full.select_dtypes(include=[np.number])
     corr_matrix = X_full.corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
