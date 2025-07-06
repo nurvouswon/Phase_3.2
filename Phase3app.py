@@ -144,9 +144,8 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # ==== CHOOSE MODE ====
     if not use_world_class:
-        # =========== AI ENSEMBLE (SOFT VOTING) ===========
+        # =========== CLASSIC AI ENSEMBLE (SOFT VOTING) ===========
         st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
         xgb_clf = xgb.XGBClassifier(
             n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
@@ -261,25 +260,38 @@ if event_file is not None and today_file is not None:
         today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
         today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
 
-        # ==== TOP 10 PRECISION LEADERBOARD ====
-        leaderboard_cols = []
-        if "player_name" in today_df.columns:
-            leaderboard_cols.append("player_name")
-        leaderboard_cols += ["hr_probability", "meta_hr_rank_score"]
-        leaderboard = today_df[leaderboard_cols]
+        # ==== TOP 10 LEADERBOARD AND MULTIPLIER PLOT ====
+        desired_cols = ["player_name", "team", "game_time", "opposing_pitcher", "hr_probability", "meta_hr_rank_score"]
+        cols = [c for c in desired_cols if c in today_df.columns]
+        leaderboard = today_df[cols].copy()
         leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
         leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
         top_n = 10
-        st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI Top 10 Booster)**")
         leaderboard_top = leaderboard.head(top_n)
+        st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI Top 10 Booster)**")
         st.dataframe(leaderboard_top, use_container_width=True)
         st.download_button(
             f"⬇️ Download Top {top_n} Leaderboard CSV",
             data=leaderboard_top.to_csv(index=False),
             file_name=f"top{top_n}_leaderboard.csv"
         )
-    # ==== WORLD CLASS MODE: OPTUNA + STACKING + SHAP EXPLAINER ====
+
+        st.subheader("💸 Outlay Multiplier Strength (Top 10)")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.barh(
+            leaderboard_top["player_name"].astype(str),
+            leaderboard_top["meta_hr_rank_score"],
+            color="mediumseagreen"
+        )
+        ax.set_xlabel("Meta HR Rank Score (Multiplier Strength)")
+        ax.set_ylabel("Player")
+        ax.invert_yaxis()
+        for i, v in enumerate(leaderboard_top["meta_hr_rank_score"]):
+            ax.text(v, i, f"{v:.2f}", va='center')
+        st.pyplot(fig)
+
     else:
+        # ==== WORLD CLASS: OPTUNA + STACKING + SHAP EXPLAINER ====
         st.markdown("## 🚀 **World Class Stacking AI (Optuna, SHAP, Platt/Isotonic Calib, Advanced Meta)**")
         def drift_check(train, test):
             p_values = [ks_2samp(train[:, i], test[:, i]).pvalue for i in range(train.shape[1])]
@@ -287,7 +299,6 @@ if event_file is not None and today_file is not None:
         if drift_check(X_train_scaled, X_today_scaled):
             st.warning("⚠️ Drift detected: Consider retraining your model.")
 
-        # XGB Optuna hyperparameter tuning
         def opt_objective(trial):
             clf = xgb.XGBClassifier(
                 n_estimators=trial.suggest_int('n_estimators', 50, 150),
@@ -304,22 +315,18 @@ if event_file is not None and today_file is not None:
         lgb_clf = lgb.LGBMClassifier(n_estimators=100)
         cat_clf = cb.CatBoostClassifier(iterations=100, verbose=0)
         rf_clf = RandomForestClassifier(n_estimators=80)
-
         stack = StackingClassifier(
             estimators=[('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf)],
             final_estimator=LogisticRegression(),
             cv=StratifiedKFold(5)
         )
         stack.fit(X_train_scaled, y_train)
-
-        # Isotonic + Platt (Sigmoid) Calibration
         iso = IsotonicRegression().fit(stack.predict_proba(X_val_scaled)[:, 1], y_val)
         platt_calib = CalibratedClassifierCV(stack, method='sigmoid', cv='prefit').fit(X_val_scaled, y_val)
         preds_iso = iso.transform(stack.predict_proba(X_today_scaled)[:, 1])
         preds_platt = platt_calib.predict_proba(X_today_scaled)[:, 1]
         today_df['hr_probability'] = (preds_iso + preds_platt) / 2
 
-        # World class meta features
         today_df['Momentum'] = today_df['hr_probability'].diff().fillna(0)
         today_df['Fatigue'] = today_df['hr_probability'].rolling(window=3).mean().fillna(method='bfill')
         meta_feats = today_df[['hr_probability', 'Momentum', 'Fatigue']]
@@ -330,13 +337,15 @@ if event_file is not None and today_file is not None:
         today_df['meta_hr_rank_score'] = meta_boost.predict(meta_feats)
         today_df = today_df.sort_values('meta_hr_rank_score', ascending=False).reset_index(drop=True)
 
-        # Leaderboard
-        leaderboard = today_df[["player_name", "hr_probability", "meta_hr_rank_score"]]
+        # ==== TOP 10 LEADERBOARD AND MULTIPLIER PLOT ====
+        desired_cols = ["player_name", "team", "game_time", "opposing_pitcher", "hr_probability", "meta_hr_rank_score"]
+        cols = [c for c in desired_cols if c in today_df.columns]
+        leaderboard = today_df[cols].copy()
         leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
         leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
         top_n = 10
-        st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (World Class Booster)**")
         leaderboard_top = leaderboard.head(top_n)
+        st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (World Class Booster)**")
         st.dataframe(leaderboard_top, use_container_width=True)
         st.download_button(
             f"⬇️ Download Top {top_n} Leaderboard CSV",
@@ -344,8 +353,22 @@ if event_file is not None and today_file is not None:
             file_name=f"top{top_n}_worldclass_leaderboard.csv"
         )
 
-        # ==== SHAP Feature Importance Impact ====
-        st.subheader("📈 SHAP Feature Impact")
+        st.subheader("💸 Outlay Multiplier Strength (Top 10)")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.barh(
+            leaderboard_top["player_name"].astype(str),
+            leaderboard_top["meta_hr_rank_score"],
+            color="mediumseagreen"
+        )
+        ax.set_xlabel("Meta HR Rank Score (Multiplier Strength)")
+        ax.set_ylabel("Player")
+        ax.invert_yaxis()
+        for i, v in enumerate(leaderboard_top["meta_hr_rank_score"]):
+            ax.text(v, i, f"{v:.2f}", va='center')
+        st.pyplot(fig)
+
+        # ==== SHAP Feature Impact Plot ====
+        st.subheader("📈 SHAP Feature Impact (XGB)")
         try:
             explainer = shap.TreeExplainer(xgb_clf.fit(X_train_scaled, y_train))
             shap_values = explainer.shap_values(X_today_scaled)
@@ -357,7 +380,7 @@ if event_file is not None and today_file is not None:
         # ==== HR Probability Distribution Plot ====
         st.subheader("📊 HR Probability Distribution (Top 10)")
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.barh(leaderboard_top["player_name"], leaderboard_top["hr_probability"], color='dodgerblue')
+        ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
         ax.invert_yaxis()
         ax.set_xlabel('HR Probability')
         ax.set_ylabel('Player')
