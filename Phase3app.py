@@ -11,7 +11,6 @@ import lightgbm as lgb
 import catboost as cb
 import matplotlib.pyplot as plt
 from sklearn.isotonic import IsotonicRegression
-from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
@@ -153,7 +152,6 @@ if event_file is not None and today_file is not None:
 
     # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
     st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
-    # Set threshold at 0.99 (no slider)
     clust_thresh = 0.99
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
@@ -167,7 +165,6 @@ if event_file is not None and today_file is not None:
     st.write(f"Features retained after clustering: {len(feature_cols)}")
     st.write(feature_cols)
 
-    # ==== PCA FINAL REDUCTION ====
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
@@ -175,20 +172,16 @@ if event_file is not None and today_file is not None:
     X_today = downcast_df(X_today)
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
-    st.write("Running PCA to retain 95% variance...")
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X_today_scaled = scaler.transform(X_today)
-    pca = PCA(n_components=0.95, svd_solver='full', random_state=42)
-    X_pca = pca.fit_transform(X_scaled)
-    X_today_pca = pca.transform(X_today_scaled)
-    st.write(f"PCA reduced to {X_pca.shape[1]} components (from {len(feature_cols)})")
-
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
-        X_pca, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=0.2, random_state=42, stratify=y
     )
-    # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING & STACKING) ===========
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_today_scaled = scaler.transform(X_today)
+
+    # =========== DEEP RESEARCH ENSEMBLE (VOTING & STACKING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
         n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
@@ -201,39 +194,38 @@ if event_file is not None and today_file is not None:
     lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
     model_status = []
     models_for_ensemble = []
-    importances = {}
     try:
-        xgb_clf.fit(X_train, y_train)
+        xgb_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('xgb', xgb_clf))
         model_status.append('XGB OK')
     except Exception as e:
         st.warning(f"XGBoost failed: {e}")
     try:
-        lgb_clf.fit(X_train, y_train)
+        lgb_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('lgb', lgb_clf))
         model_status.append('LGB OK')
     except Exception as e:
         st.warning(f"LightGBM failed: {e}")
     try:
-        cat_clf.fit(X_train, y_train)
+        cat_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('cat', cat_clf))
         model_status.append('CatBoost OK')
     except Exception as e:
         st.warning(f"CatBoost failed: {e}")
     try:
-        rf_clf.fit(X_train, y_train)
+        rf_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('rf', rf_clf))
         model_status.append('RF OK')
     except Exception as e:
         st.warning(f"RandomForest failed: {e}")
     try:
-        gb_clf.fit(X_train, y_train)
+        gb_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('gb', gb_clf))
         model_status.append('GB OK')
     except Exception as e:
         st.warning(f"GBM failed: {e}")
     try:
-        lr_clf.fit(X_train, y_train)
+        lr_clf.fit(X_train_scaled, y_train)
         models_for_ensemble.append(('lr', lr_clf))
         model_status.append('LR OK')
     except Exception as e:
@@ -245,16 +237,17 @@ if event_file is not None and today_file is not None:
 
     st.write("Fitting soft-voting ensemble...")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    ensemble.fit(X_train, y_train)
+    ensemble.fit(X_train_scaled, y_train)
+
     st.write("Fitting stacking meta-model (Logistic Regression on ensemble outputs)...")
     stacking_estimators = [(n, m) for n, m in models_for_ensemble]
     stacker = StackingClassifier(
         estimators=stacking_estimators, final_estimator=LogisticRegression(max_iter=600), cv=3, n_jobs=1, passthrough=True)
-    stacker.fit(X_train, y_train)
+    stacker.fit(X_train_scaled, y_train)
 
     # =========== VALIDATION ===========
     st.write("Validating (out-of-fold, not test-leak)...")
-    y_val_pred = stacker.predict_proba(X_val)[:, 1]
+    y_val_pred = stacker.predict_proba(X_val_scaled)[:, 1]
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
@@ -266,7 +259,7 @@ if event_file is not None and today_file is not None:
 
     # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
-    y_today_pred = stacker.predict_proba(X_today_pca)[:, 1]
+    y_today_pred = stacker.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
