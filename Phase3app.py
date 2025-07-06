@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, GroupKFold
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
@@ -47,7 +47,7 @@ def fix_types(df):
 def clean_X(df, train_cols=None):
     df = dedup_columns(df)
     df = fix_types(df)
-    allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status', 'game_date'}
+    allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status'}
     drop_cols = [c for c in df.select_dtypes('O').columns if c not in allowed_obj]
     df = df.drop(columns=drop_cols, errors='ignore')
     df = df.fillna(-1)
@@ -87,7 +87,7 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
@@ -292,74 +292,45 @@ if event_file is not None and today_file is not None:
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+
+    # =========== PREDICT ===========
+    st.write("Predicting HR probability for today (calibrated)...")
     y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    # ==== APPLY OVERLAY SCORING ====
-    today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-    today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
-
-    # ==== TOP N LEADERBOARD FOR TODAY ====
+    # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
-    leaderboard_today = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
-    leaderboard_today["hr_probability"] = leaderboard_today["hr_probability"].round(4)
-    leaderboard_today["final_hr_probability"] = leaderboard_today["final_hr_probability"].round(4)
-    leaderboard_today["overlay_multiplier"] = leaderboard_today["overlay_multiplier"].round(3)
+    leaderboard_cols += ["hr_probability"]
 
-    # ==== HISTORICAL META-RANKER TRAINING (auto-select features, top 50 per day) ====
-    st.write("🛠️ Training meta-ranker on historical top 50s...")
-    # Needs 'game_date' and 'player_name' in your event_df
-    candidates = []
-    for date, group in event_df.groupby("game_date"):
-        # Predict probabilities for all candidates in this day
-        X_day = clean_X(group[feature_cols], train_cols=X.columns)
-        X_day_scaled = scaler.transform(X_day)
-        prob = ensemble.predict_proba(X_day_scaled)[:, 1]
-        overlay = group.apply(overlay_multiplier, axis=1)
-        final_prob = (prob * overlay).clip(0, 1)
-        day_candidates = group.copy()
-        day_candidates["hr_probability"] = prob
-        day_candidates["overlay_multiplier"] = overlay
-        day_candidates["final_hr_probability"] = final_prob
-        top50 = day_candidates.sort_values("final_hr_probability", ascending=False).head(50)
-        candidates.append(top50)
-    meta_df = pd.concat(candidates, axis=0).reset_index(drop=True)
-    # Choose meta-ranker features: everything numeric except 'hr_outcome' and IDs
-    ignore_cols = set(['hr_outcome','batter_id','pitcher_id','game_date','player_name','city','park','roof_status'])
-    meta_features = [c for c in meta_df.select_dtypes(include=[np.number]).columns if c not in ignore_cols]
-    X_meta = meta_df[meta_features].fillna(-1)
-    y_meta = meta_df['hr_outcome'].astype(int)
-    # Fit meta-ranker (tree model is robust to noise)
-    meta_rerank = GradientBoostingClassifier(n_estimators=80, max_depth=5, learning_rate=0.09)
-    meta_rerank.fit(X_meta, y_meta)
+    leaderboard = today_df[leaderboard_cols].sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
 
-    # ==== APPLY META-RANKER TO TODAY'S TOP 30 ====
-    st.write("🛠️ Applying meta-ranker to today's leaderboard...")
-    leaderboard_top = leaderboard_today.head(30).copy()
-    X_top_meta = leaderboard_top[meta_features].fillna(-1)
-    meta_probs = meta_rerank.predict_proba(X_top_meta)[:, 1]
-    leaderboard_top['meta_rerank_prob'] = meta_probs
-
-    # Re-sort by meta-rerank probability (optionally blend with original probability)
-    leaderboard_top = leaderboard_top.sort_values('meta_rerank_prob', ascending=False).reset_index(drop=True)
-
-    st.markdown(f"### 🏆 **Top 30 Meta-Reranked HR Leaderboard**")
+    top_n = 30
+    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
+    leaderboard_top = leaderboard.head(top_n)
     st.dataframe(leaderboard_top, use_container_width=True)
 
-    # Downloadable outputs
+    # Confidence gap: drop-off between last included and next
+    if len(leaderboard) > top_n:
+        gap = leaderboard.loc[top_n - 1, "hr_probability"] - leaderboard.loc[top_n, "hr_probability"]
+        st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
+    else:
+        st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
+
+    # Download full leaderboard and prediction CSVs
     st.download_button(
         f"⬇️ Download Full Prediction CSV",
         data=today_df.to_csv(index=False),
         file_name="today_hr_predictions.csv"
     )
     st.download_button(
-        f"⬇️ Download Top 30 Meta-Reranked Leaderboard CSV",
+        f"⬇️ Download Top {top_n} Leaderboard CSV",
         data=leaderboard_top.to_csv(index=False),
-        file_name="top30_meta_reranked_leaderboard.csv"
+        file_name=f"top{top_n}_leaderboard.csv"
     )
+
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
