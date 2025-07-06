@@ -87,7 +87,7 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
@@ -125,23 +125,6 @@ def overlay_multiplier(row):
         multiplier *= pf
     return multiplier
 
-# ==== FEATURE INTERACTION ENGINEERING ====
-def add_interactions(df):
-    # Only add interactions if both columns are present
-    combos = [
-        ('b_hard_hit_rate_14', 'b_slg_14', 'b_hard_hit_x_b_slg_14'),
-        ('b_barrel_rate_7', 'park_hr_rate', 'barrel7_x_park'),
-        ('b_rolling_hr_3', 'park_hr_rate', 'b_rolling_hr3_x_park'),
-        ('p_rolling_hr_3', 'park_hr_rate', 'p_rolling_hr3_x_park'),
-        ('b_fb_rate_7', 'park_altitude', 'fb7_x_altitude'),
-        ('p_fb_rate_7', 'park_hr_rate', 'pfb7_x_park'),
-        # You can add more combos as you see fit!
-    ]
-    for f1, f2, name in combos:
-        if f1 in df.columns and f2 in df.columns:
-            df[name] = df[f1] * df[f2]
-    return df
-
 # ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
@@ -178,31 +161,25 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    # ==== FEATURE CLUSTERING 0.99 ====
-    st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group (0.99 threshold)")
-    clust_thresh = 0.99
+    # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
+    st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
+    clust_thresh = 0.99  # Fixed threshold, no slider
 
+    # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-
-    # Add interaction features to event/today before clustering!
-    event_df = add_interactions(event_df)
-    today_df = add_interactions(today_df)
-    for col in event_df.columns:
-        if col not in feature_cols and col not in ['hr_outcome']:
-            feature_cols.append(col)
-
-    st.write(f"Number of initial features (incl. interactions): {len(feature_cols)}")
+    st.write(f"Number of initial features: {len(feature_cols)}")
 
     X_full = event_df[feature_cols].fillna(0)
-    # Ensure all columns are numeric (object columns will be dropped)
-    X_full = X_full.select_dtypes(include=[np.number])
     corr_matrix = X_full.corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
     feature_cols = [col for col in feature_cols if col not in to_drop]
-    st.write(f"Features retained after clustering: {len(feature_cols)}")
+
+    # FINAL INTERSECTION with today's columns to ensure no KeyError
+    feature_cols = [col for col in feature_cols if col in today_df.columns]
+    st.write(f"Features retained after clustering & intersection: {len(feature_cols)}")
     st.write(feature_cols)
 
     X = clean_X(event_df[feature_cols])
@@ -343,50 +320,11 @@ if event_file is not None and today_file is not None:
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
 
-    # ==== META RERANKER: Post-prediction leaderboard rerank ====
-    # Build meta features for reranking Top 30 (from engineered interactions, overlay, base prob)
+    # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
-    rerank_features = [
-        "hr_probability",
-        "overlay_multiplier",
-        "final_hr_probability",
-        # Add interaction features from add_interactions()
-        "b_hard_hit_x_b_slg_14",
-        "barrel7_x_park",
-        "b_rolling_hr3_x_park",
-        "p_rolling_hr3_x_park",
-        "fb7_x_altitude",
-        "pfb7_x_park",
-        "park_hr_rate",
-        "b_rolling_hr_3",
-        "p_rolling_hr_3",
-        "b_slg_14",
-        "b_barrel_rate_7",
-        "b_fb_rate_7",
-        "p_fb_rate_7"
-    ]
-    # Ensure these features are present
-    rerank_features = [f for f in rerank_features if f in today_df.columns]
 
-    leaderboard_top = leaderboard.head(top_n).copy()
-    # Meta reranker can only train on available data, so OOF logic is shown, but in production, you'd train externally
-    # Here, we simply fit on all available data for demo
-    meta_X = today_df[rerank_features].fillna(0)
-    meta_y = (today_df["final_hr_probability"].rank(pct=True, ascending=False) < (top_n/len(today_df))).astype(int)  # Approximate: Top N = "1"
-    meta_X_top = leaderboard_top[rerank_features].fillna(0)
-
-    # Fit reranker model
-    meta_model = lgb.LGBMClassifier(n_estimators=30, learning_rate=0.09, max_depth=3, random_state=42)
-    try:
-        meta_model.fit(meta_X, meta_y)
-        leaderboard_top["meta_rerank_score"] = meta_model.predict_proba(meta_X_top)[:,1]
-        leaderboard_top = leaderboard_top.sort_values("meta_rerank_score", ascending=False).reset_index(drop=True)
-        st.success("Meta reranker successfully reranked Top 30!")
-    except Exception as e:
-        st.warning(f"Meta reranker failed: {e}")
-
-    # Show final leaderboard and allow download
-    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Meta Reranked)**")
+    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
+    leaderboard_top = leaderboard.head(top_n)
     st.dataframe(leaderboard_top, use_container_width=True)
 
     # Confidence gap: drop-off between last included and next
@@ -403,9 +341,9 @@ if event_file is not None and today_file is not None:
         file_name="today_hr_predictions.csv"
     )
     st.download_button(
-        f"⬇️ Download Top {top_n} Leaderboard CSV (Meta Reranked)",
+        f"⬇️ Download Top {top_n} Leaderboard CSV",
         data=leaderboard_top.to_csv(index=False),
-        file_name=f"top{top_n}_meta_reranked_leaderboard.csv"
+        file_name=f"top{top_n}_leaderboard.csv"
     )
 
 else:
