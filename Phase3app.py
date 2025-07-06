@@ -1,4 +1,4 @@
-import streamlit as st import pandas as pd import numpy as np from sklearn.model_selection import train_test_split, StratifiedKFold from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, StackingClassifier, GradientBoostingRegressor from sklearn.linear_model import LogisticRegression from sklearn.metrics import roc_auc_score from sklearn.preprocessing import StandardScaler import xgboost as xgb import lightgbm as lgb import catboost as cb from sklearn.isotonic import IsotonicRegression from sklearn.calibration import CalibratedClassifierCV import shap import optuna from alibi_detect.cd import KSDrift from datetime import datetime import matplotlib.pyplot as plt
+import streamlit as st import pandas as pd import numpy as np from sklearn.model_selection import train_test_split, StratifiedKFold from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, StackingClassifier, GradientBoostingRegressor from sklearn.linear_model import LogisticRegression from sklearn.metrics import roc_auc_score from sklearn.preprocessing import StandardScaler import xgboost as xgb import lightgbm as lgb import catboost as cb from sklearn.isotonic import IsotonicRegression from sklearn.calibration import CalibratedClassifierCV import shap import optuna from scipy.stats import ks_2samp from datetime import datetime import matplotlib.pyplot as plt
 
 st.set_page_config("🏆 MLB HR Predictor — AI Top 10 World Class", layout="wide") st.title("🏆 MLB Home Run Predictor — AI-Powered Supercharged")
 
@@ -15,12 +15,15 @@ mutual_feats = list(set(event_df.columns) & set(today_df.columns) - {'hr_outcome
 X, y = event_df[mutual_feats].fillna(-1), event_df['hr_outcome']
 X_today = today_df[mutual_feats].fillna(-1)
 
-drift = KSDrift(X.values).predict(X_today.values)
-if drift['data']['is_drift']:
-    st.warning("⚠️ Drift detected: Retraining initiated.")
-
 scaler = StandardScaler().fit(X)
 X_scaled, X_today_scaled = scaler.transform(X), scaler.transform(X_today)
+
+def drift_check(train, test):
+    p_values = [ks_2samp(train[:, i], test[:, i]).pvalue for i in range(train.shape[1])]
+    return np.any(np.array(p_values) < 0.05)
+
+if drift_check(X_scaled, X_today_scaled):
+    st.warning("⚠️ Drift detected: Consider retraining your model.")
 
 X_train, X_val, y_train, y_val = train_test_split(X_scaled, y, stratify=y, random_state=42)
 
