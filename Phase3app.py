@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, StackingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
@@ -12,6 +12,7 @@ import catboost as cb
 import matplotlib.pyplot as plt
 from sklearn.isotonic import IsotonicRegression
 from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -65,18 +66,6 @@ def get_valid_feature_cols(df, drop=None):
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
 
-def drop_high_na_low_var(df, thresh_na=1.0, thresh_var=0.0):
-    cols_to_drop = []
-    na_frac = df.isnull().mean()
-    low_var_cols = df.select_dtypes(include=[np.number]).columns[df.select_dtypes(include=[np.number]).std() < thresh_var]
-    for c in df.columns:
-        if na_frac.get(c, 0) > thresh_na:
-            cols_to_drop.append(c)
-        elif c in low_var_cols:
-            cols_to_drop.append(c)
-    df2 = df.drop(columns=cols_to_drop, errors="ignore")
-    return df2, cols_to_drop
-
 def downcast_df(df):
     float_cols = df.select_dtypes(include=['float'])
     int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
@@ -88,7 +77,7 @@ def downcast_df(df):
 
 def nan_inf_check(df, name):
     numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
+    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
@@ -164,7 +153,8 @@ if event_file is not None and today_file is not None:
 
     # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
     st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
-    clust_thresh = 0.99  # FIXED threshold, no slider
+    # Set threshold at 0.99 (no slider)
+    clust_thresh = 0.99
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
@@ -177,33 +167,28 @@ if event_file is not None and today_file is not None:
     st.write(f"Features retained after clustering: {len(feature_cols)}")
     st.write(feature_cols)
 
+    # ==== PCA FINAL REDUCTION ====
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
     X = downcast_df(X)
     X_today = downcast_df(X_today)
-
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
+    st.write("Running PCA to retain 95% variance...")
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_today_scaled = scaler.transform(X_today)
+    pca = PCA(n_components=0.95, svd_solver='full', random_state=42)
+    X_pca = pca.fit_transform(X_scaled)
+    X_today_pca = pca.transform(X_today_scaled)
+    st.write(f"PCA reduced to {X_pca.shape[1]} components (from {len(feature_cols)})")
 
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X_pca, y, test_size=0.2, random_state=42, stratify=y
     )
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today)
-
-    # ==== PCA (Deep Research Best Practice) ====
-    st.markdown("## 🧬 PCA: Final Filter Before Modeling (95% Variance Kept)")
-    pca = PCA(n_components=0.95, random_state=42)
-    X_train_pca = pca.fit_transform(X_train_scaled)
-    X_val_pca = pca.transform(X_val_scaled)
-    X_today_pca = pca.transform(X_today_scaled)
-    st.write(f"PCA reduced features to: {X_train_pca.shape[1]}")
-
-    # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
+    # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING & STACKING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
     xgb_clf = xgb.XGBClassifier(
         n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
@@ -214,62 +199,62 @@ if event_file is not None and today_file is not None:
     rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
     gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
     lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-
     model_status = []
     models_for_ensemble = []
     importances = {}
     try:
-        xgb_clf.fit(X_train_pca, y_train)
+        xgb_clf.fit(X_train, y_train)
         models_for_ensemble.append(('xgb', xgb_clf))
         model_status.append('XGB OK')
     except Exception as e:
         st.warning(f"XGBoost failed: {e}")
     try:
-        lgb_clf.fit(X_train_pca, y_train)
+        lgb_clf.fit(X_train, y_train)
         models_for_ensemble.append(('lgb', lgb_clf))
         model_status.append('LGB OK')
     except Exception as e:
         st.warning(f"LightGBM failed: {e}")
     try:
-        cat_clf.fit(X_train_pca, y_train)
+        cat_clf.fit(X_train, y_train)
         models_for_ensemble.append(('cat', cat_clf))
         model_status.append('CatBoost OK')
     except Exception as e:
         st.warning(f"CatBoost failed: {e}")
     try:
-        rf_clf.fit(X_train_pca, y_train)
+        rf_clf.fit(X_train, y_train)
         models_for_ensemble.append(('rf', rf_clf))
         model_status.append('RF OK')
     except Exception as e:
         st.warning(f"RandomForest failed: {e}")
     try:
-        gb_clf.fit(X_train_pca, y_train)
+        gb_clf.fit(X_train, y_train)
         models_for_ensemble.append(('gb', gb_clf))
         model_status.append('GB OK')
     except Exception as e:
         st.warning(f"GBM failed: {e}")
     try:
-        lr_clf.fit(X_train_pca, y_train)
+        lr_clf.fit(X_train, y_train)
         models_for_ensemble.append(('lr', lr_clf))
         model_status.append('LR OK')
     except Exception as e:
         st.warning(f"LogReg failed: {e}")
-
     st.info("Model training status: " + ', '.join(model_status))
     if not models_for_ensemble:
         st.error("All models failed to train! Try reducing features or rows.")
         st.stop()
 
-    st.write("Fitting ensemble (soft voting)...")
+    st.write("Fitting soft-voting ensemble...")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    ensemble.fit(X_train_pca, y_train)
-
-    # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
-    st.warning("Feature importances are not available when using PCA. If you need interpretability, run the model without PCA.")
+    ensemble.fit(X_train, y_train)
+    st.write("Fitting stacking meta-model (Logistic Regression on ensemble outputs)...")
+    stacking_estimators = [(n, m) for n, m in models_for_ensemble]
+    stacker = StackingClassifier(
+        estimators=stacking_estimators, final_estimator=LogisticRegression(max_iter=600), cv=3, n_jobs=1, passthrough=True)
+    stacker.fit(X_train, y_train)
 
     # =========== VALIDATION ===========
     st.write("Validating (out-of-fold, not test-leak)...")
-    y_val_pred = ensemble.predict_proba(X_val_pca)[:,1]
+    y_val_pred = stacker.predict_proba(X_val)[:, 1]
     auc = roc_auc_score(y_val, y_val_pred)
     ll = log_loss(y_val, y_val_pred)
     st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
@@ -278,41 +263,62 @@ if event_file is not None and today_file is not None:
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+
     # =========== PREDICT ===========
     st.write("Predicting HR probability for today (calibrated)...")
-    y_today_pred = ensemble.predict_proba(X_today_pca)[:, 1]
+    y_today_pred = stacker.predict_proba(X_today_pca)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
     # ==== APPLY OVERLAY SCORING ====
     st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
-    if 'hr_probability' in today_df.columns:
-        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
-    else:
-        today_df['final_hr_probability'] = today_df['hr_probability']
+    today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
+    today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
 
-    # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
+    # ==== TOP N PRECISION LEADERBOARD WITH META CLUSTER RE-RANK ====
+    top_n = 30
+
+    # --- Meta-cluster reranking: cluster top 50 by key rolling/xHR/exit velo context and bump best in each ---
+    meta_features = ['b_barrel_rate_7', 'b_avg_exit_velo_7', 'b_slg_7', 'b_hr_per_pa_3', 'b_sweet_spot_rate_7', 'park_hr_rate']
+    for f in meta_features:
+        if f not in today_df.columns:
+            today_df[f] = 0
+
+    leaderboard = today_df.sort_values("final_hr_probability", ascending=False).head(50).copy()
+    meta_X = leaderboard[meta_features].fillna(0).to_numpy()
+    n_clusters = min(5, len(leaderboard))
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init='auto')
+    clusters = kmeans.fit_predict(meta_X)
+    leaderboard['cluster'] = clusters
+
+    # Boost the top meta-feature (hot hand) player within each cluster
+    leaderboard['meta_score'] = leaderboard['final_hr_probability'] + 0.10 * leaderboard['b_barrel_rate_7'].rank(pct=True) + 0.10 * leaderboard['b_avg_exit_velo_7'].rank(pct=True)
+    boosted = leaderboard.groupby('cluster').apply(lambda x: x.sort_values('meta_score', ascending=False)).reset_index(drop=True)
+    final_leaderboard = boosted.sort_values('meta_score', ascending=False).head(top_n).copy()
+
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
     leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
+    for f in meta_features:
+        if f in today_df.columns:
+            leaderboard_cols.append(f)
+    if "meta_score" in final_leaderboard.columns:
+        leaderboard_cols.append("meta_score")
 
-    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
-    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
+    final_leaderboard = final_leaderboard[leaderboard_cols]
+    final_leaderboard["hr_probability"] = final_leaderboard["hr_probability"].round(4)
+    final_leaderboard["final_hr_probability"] = final_leaderboard["final_hr_probability"].round(4)
+    final_leaderboard["overlay_multiplier"] = final_leaderboard["overlay_multiplier"].round(3)
+    if "meta_score" in final_leaderboard.columns:
+        final_leaderboard["meta_score"] = final_leaderboard["meta_score"].round(4)
 
-    # Change this value for Top 10 or Top 30 leaderboard
-    top_n = 30
-
-    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
-    leaderboard_top = leaderboard.head(top_n)
-    st.dataframe(leaderboard_top, use_container_width=True)
+    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Meta Cluster Adjusted, Deep Calibrated)**")
+    st.dataframe(final_leaderboard, use_container_width=True)
 
     # Confidence gap: drop-off between last included and next
-    if len(leaderboard) > top_n:
-        gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
+    if len(final_leaderboard) > top_n:
+        gap = final_leaderboard.loc[top_n - 1, "final_hr_probability"] - final_leaderboard.loc[top_n, "final_hr_probability"]
         st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
     else:
         st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
@@ -325,9 +331,8 @@ if event_file is not None and today_file is not None:
     )
     st.download_button(
         f"⬇️ Download Top {top_n} Leaderboard CSV",
-        data=leaderboard_top.to_csv(index=False),
+        data=final_leaderboard.to_csv(index=False),
         file_name=f"top{top_n}_leaderboard.csv"
     )
-
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
