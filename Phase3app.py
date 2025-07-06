@@ -5,13 +5,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
-from sklearn.preprocessing import StandardScaler, PolynomialFeatures
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 import matplotlib.pyplot as plt
 from sklearn.isotonic import IsotonicRegression
+from sklearn.ensemble import GradientBoostingRegressor
+from itertools import combinations
 
 st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
 st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
@@ -162,9 +163,9 @@ if event_file is not None and today_file is not None:
     st.write("Value counts for hr_outcome:")
     st.dataframe(value_counts)
 
-    # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
+    # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group (0.99) ====
     st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
-    clust_thresh = 0.99  # Fixed threshold, no slider
+    clust_thresh = 0.99  # <- as requested, no slider
 
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
@@ -176,49 +177,51 @@ if event_file is not None and today_file is not None:
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
     feature_cols = [col for col in feature_cols if col not in to_drop]
-    feature_cols = [col for col in feature_cols if col in today_df.columns]
-    st.write(f"Features retained after clustering & intersection: {len(feature_cols)}")
+    st.write(f"Features retained after clustering: {len(feature_cols)}")
     st.write(feature_cols)
+
+    # ==== FEATURE INTERACTIONS (Pairwise products of top features) ====
+    st.markdown("## ⚡ Creating Pairwise Feature Interactions (Top 10 only)")
+    # Use feature importance from XGB on original features to find top 10
+    X_inter = clean_X(event_df[feature_cols])
+    y_inter = event_df[target_col]
+    scaler_inter = StandardScaler()
+    X_inter_scaled = scaler_inter.fit_transform(X_inter)
+    xgb_temp = xgb.XGBClassifier(n_estimators=25, max_depth=3, learning_rate=0.15, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0, tree_method='hist')
+    xgb_temp.fit(X_inter_scaled, y_inter)
+    importances_temp = xgb_temp.feature_importances_
+    top_ix = np.argsort(importances_temp)[::-1][:10]
+    top_feats = [X_inter.columns[i] for i in top_ix]
+
+    # Pairwise products
+    new_cols = []
+    for f1, f2 in combinations(top_feats, 2):
+        colname = f"{f1}_X_{f2}"
+        event_df[colname] = event_df[f1] * event_df[f2]
+        today_df[colname] = today_df[f1] * today_df[f2]
+        new_cols.append(colname)
+    st.write(f"Added {len(new_cols)} feature interaction columns (Top 10 pairwise)")
+
+    # Add to feature_cols for main modeling
+    feature_cols += new_cols
 
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
     X = downcast_df(X)
     X_today = downcast_df(X_today)
+
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    # ==== A. Feature Interactions (Top-K by importances, 2-way only) ====
-    st.markdown("### ⚡️ Generating Interaction Features (Auto-Polynomial, Deep Research)")
-    # Just fit a quick RF for importances
-    rf_temp = RandomForestClassifier(n_estimators=30, n_jobs=1)
-    rf_temp.fit(X, y)
-    imp_df = pd.DataFrame({'feature': X.columns, 'importance': rf_temp.feature_importances_}).sort_values('importance', ascending=False)
-    topK = 10
-    interaction_features = imp_df['feature'].iloc[:topK].tolist()
-    pf = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
-    X_inter = pf.fit_transform(X[interaction_features])
-    X_today_inter = pf.transform(X_today[interaction_features])
-    inter_feature_names = pf.get_feature_names_out(interaction_features)
-    # Drop any duplicate columns between main and inter set
-    inter_df = pd.DataFrame(X_inter, columns=inter_feature_names, index=X.index)
-    today_inter_df = pd.DataFrame(X_today_inter, columns=inter_feature_names, index=X_today.index)
-    # Remove original topK features from inter_df to prevent duplication
-    inter_df = inter_df.drop(columns=[f for f in interaction_features if f in inter_df.columns], errors='ignore')
-    today_inter_df = today_inter_df.drop(columns=[f for f in interaction_features if f in today_inter_df.columns], errors='ignore')
-    # Concat for final design matrix
-    X_fullF = pd.concat([X, inter_df], axis=1)
-    X_today_fullF = pd.concat([X_today, today_inter_df], axis=1)
-
-    # ==== Split, Scale, Validation ====
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
-        X_fullF, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=0.2, random_state=42, stratify=y
     )
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today_fullF)
+    X_today_scaled = scaler.transform(X_today)
 
     # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
     st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
@@ -234,53 +237,66 @@ if event_file is not None and today_file is not None:
 
     model_status = []
     models_for_ensemble = []
-    base_val_preds = []
-    base_today_preds = []
     importances = {}
-    for model, name in zip([xgb_clf, lgb_clf, cat_clf, rf_clf, gb_clf, lr_clf], ['xgb', 'lgb', 'cat', 'rf', 'gb', 'lr']):
-        try:
-            model.fit(X_train_scaled, y_train)
-            models_for_ensemble.append((name, model))
-            model_status.append(f"{name.upper()} OK")
-            # Store importances if possible
-            if hasattr(model, "feature_importances_"):
-                importances[name.upper()] = model.feature_importances_
-            elif hasattr(model, "coef_"):
-                importances[name.upper()] = np.abs(model.coef_[0])
-            # For stacking meta
-            base_val_preds.append(model.predict_proba(X_val_scaled)[:,1])
-            base_today_preds.append(model.predict_proba(X_today_scaled)[:,1])
-        except Exception as e:
-            st.warning(f"{name.upper()} failed: {e}")
+    try:
+        xgb_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('xgb', xgb_clf))
+        model_status.append('XGB OK')
+        importances['XGB'] = xgb_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"XGBoost failed: {e}")
+    try:
+        lgb_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('lgb', lgb_clf))
+        model_status.append('LGB OK')
+        importances['LGB'] = lgb_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"LightGBM failed: {e}")
+    try:
+        cat_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('cat', cat_clf))
+        model_status.append('CatBoost OK')
+        importances['CatBoost'] = cat_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"CatBoost failed: {e}")
+    try:
+        rf_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('rf', rf_clf))
+        model_status.append('RF OK')
+        importances['RF'] = rf_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"RandomForest failed: {e}")
+    try:
+        gb_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('gb', gb_clf))
+        model_status.append('GB OK')
+        importances['GB'] = gb_clf.feature_importances_
+    except Exception as e:
+        st.warning(f"GBM failed: {e}")
+    try:
+        lr_clf.fit(X_train_scaled, y_train)
+        models_for_ensemble.append(('lr', lr_clf))
+        model_status.append('LR OK')
+        importances['LR'] = np.abs(lr_clf.coef_[0])
+    except Exception as e:
+        st.warning(f"LogReg failed: {e}")
 
     st.info("Model training status: " + ', '.join(model_status))
     if not models_for_ensemble:
         st.error("All models failed to train! Try reducing features or rows.")
         st.stop()
 
-    # =========== B. Stacking Meta-Model ===========
-    st.write("Training stacking meta-model (Logistic Regression)...")
-    X_meta_val = np.vstack(base_val_preds).T
-    X_meta_today = np.vstack(base_today_preds).T
-    meta_model = LogisticRegression(max_iter=600)
-    meta_model.fit(X_meta_val, y_val)
-    y_val_meta = meta_model.predict_proba(X_meta_val)[:,1]
-    y_today_meta = meta_model.predict_proba(X_meta_today)[:,1]
-
-    # ==== Main Ensemble (soft voting, for calibrated base) ====
     st.write("Fitting ensemble (soft voting)...")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
     ensemble.fit(X_train_scaled, y_train)
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
-    y_today_pred = ensemble.predict_proba(X_today_scaled)[:,1]
 
     # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
     st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
-    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CAT", "RF", "GB")]
+    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
     if tree_keys:
         tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
         import_df = pd.DataFrame({
-            "feature": X_train.columns,
+            "feature": X.columns,
             "importance": tree_importances
         }).sort_values("importance", ascending=False)
         st.dataframe(import_df.head(30), use_container_width=True)
@@ -293,88 +309,83 @@ if event_file is not None and today_file is not None:
 
     # =========== VALIDATION ===========
     st.write("Validating (out-of-fold, not test-leak)...")
+    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
     auc = roc_auc_score(y_val, y_val_pred)
-    auc_meta = roc_auc_score(y_val, y_val_meta)
     ll = log_loss(y_val, y_val_pred)
-    ll_meta = log_loss(y_val, y_val_meta)
-    st.info(f"Validation AUC (ensemble): **{auc:.4f}** — LogLoss: **{ll:.4f}**")
-    st.info(f"Validation AUC (meta-stack): **{auc_meta:.4f}** — LogLoss: **{ll_meta:.4f}**")
+    st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
 
     # =========== CALIBRATION (Isotonic Regression) ===========
     st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+    # =========== PREDICT ===========
+    st.write("Predicting HR probability for today (calibrated)...")
+    y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
-    y_today_meta_cal = ir.transform(y_today_meta)
-    # Average calibrated ensemble and stacking meta-model
-    y_today_final = (y_today_pred_cal + y_today_meta_cal) / 2
-    today_df['hr_probability'] = y_today_final
+    today_df['hr_probability'] = y_today_pred_cal
 
     # ==== APPLY OVERLAY SCORING ====
     st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
     if 'hr_probability' in today_df.columns:
         today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-    today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+    else:
+        st.error("No 'hr_probability' in today_df! Model prediction likely failed.")
+        st.stop()
+
+    # ==== POST-PREDICTION RE-RANKER (GradientBoostingRegressor) ====
+    st.markdown("## 🏁 Post-Prediction Re-Ranker (meta filter)")
+    # Only use top N for training the meta filter to target best discrimination at top of leaderboard
+    N_META = 200
+    meta_train_df = pd.DataFrame({'hr_probability': y_val_pred_cal, 'actual': y_val})
+    meta_train_df = meta_train_df.sort_values("hr_probability", ascending=False).head(N_META)
+    meta_features = np.array(meta_train_df['hr_probability']).reshape(-1,1)
+    meta_targets = np.array(meta_train_df['actual'])
+
+    # Train meta regressor to learn the ideal probability mapping for final rerank
+    meta_reg = GradientBoostingRegressor(n_estimators=40, max_depth=2)
+    meta_reg.fit(meta_features, meta_targets)
+
+    # Apply to today's predictions
+    today_df['meta_rerank_prob'] = meta_reg.predict(today_df['final_hr_probability'].values.reshape(-1,1)).clip(0, 1)
+
+    # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
+    leaderboard_cols = []
+    if "player_name" in today_df.columns:
+        leaderboard_cols.append("player_name")
+    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability", "meta_rerank_prob"]
+
+    leaderboard = today_df[leaderboard_cols].sort_values("meta_rerank_prob", ascending=False).reset_index(drop=True)
+    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
+    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
+    leaderboard["meta_rerank_prob"] = leaderboard["meta_rerank_prob"].round(4)
+
+    # Change this value for Top 10 or Top 30 leaderboard
+    top_n = 30
+
+    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Meta Reranked)**")
+    leaderboard_top = leaderboard.head(top_n)
+    st.dataframe(leaderboard_top, use_container_width=True)
+
+    # Confidence gap: drop-off between last included and next
+    if len(leaderboard) > top_n:
+        gap = leaderboard.loc[top_n - 1, "meta_rerank_prob"] - leaderboard.loc[top_n, "meta_rerank_prob"]
+        st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
+    else:
+        st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
+
+    # Download full leaderboard and prediction CSVs
+    st.download_button(
+        f"⬇️ Download Full Prediction CSV",
+        data=today_df.to_csv(index=False),
+        file_name="today_hr_predictions.csv"
+    )
+    st.download_button(
+        f"⬇️ Download Top {top_n} Leaderboard CSV",
+        data=leaderboard_top.to_csv(index=False),
+        file_name=f"top{top_n}_leaderboard.csv"
+    )
+
 else:
-    today_df['final_hr_probability'] = today_df['hr_probability']
-
-# ==== POST-PREDICTION RE-RANKER (GradientBoostingRegressor) ====
-from sklearn.ensemble import GradientBoostingRegressor
-
-# Prepare validation leaderboard for re-ranker training
-N = 30
-val_leaderboard = pd.DataFrame({
-    "prob": y_val_pred_cal,
-    "label": y_val.reset_index(drop=True)
-})
-val_leaderboard = val_leaderboard.sort_values("prob", ascending=False).reset_index(drop=True)
-idx_top_val = val_leaderboard.index[:N]
-X_val_topN = X_val_scaled[idx_top_val]
-y_val_topN = val_leaderboard['label'].iloc[:N].values
-
-# Use all scaled features for re-ranker; can concatenate interaction terms if present
-re_ranker = GradientBoostingRegressor(n_estimators=80, max_depth=4, learning_rate=0.08, random_state=42)
-re_ranker.fit(X_val_topN, y_val_topN)
-
-# Prepare TODAY leaderboard for re-ranking
-leaderboard_cols = []
-if "player_name" in today_df.columns:
-    leaderboard_cols.append("player_name")
-leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
-leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
-leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
-
-top_n = 30
-leaderboard_top = leaderboard.head(top_n).copy()
-idx_top_today = leaderboard_top.index
-X_today_topN = X_today_scaled[idx_top_today]
-
-# Predict re-rank scores
-rr_scores = re_ranker.predict(X_today_topN)
-leaderboard_top['re_rank_score'] = rr_scores
-leaderboard_top = leaderboard_top.sort_values('re_rank_score', ascending=False).reset_index(drop=True)
-
-# ==== FINAL DISPLAY ====
-st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated & Re-Ranked)**")
-st.dataframe(leaderboard_top, use_container_width=True)
-
-# Confidence gap: drop-off between last included and next
-if len(leaderboard) > top_n:
-    gap = leaderboard_top.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
-    st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
-else:
-    st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
-
-# Download full leaderboard and prediction CSVs
-st.download_button(
-    f"⬇️ Download Full Prediction CSV",
-    data=today_df.to_csv(index=False),
-    file_name="today_hr_predictions.csv"
-)
-st.download_button(
-    f"⬇️ Download Top {top_n} Leaderboard CSV",
-    data=leaderboard_top.to_csv(index=False),
-    file_name=f"top{top_n}_leaderboard.csv"
-)
+    st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
