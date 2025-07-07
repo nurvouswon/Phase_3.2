@@ -264,15 +264,15 @@ if event_file is not None and today_file is not None:
     st.write("Running Optuna for XGBoost hyperparameter tuning...")
     def optuna_objective_xgb(trial):
         clf = xgb.XGBClassifier(
-        n_estimators=trial.suggest_int('n_estimators', 60, 120),
-        max_depth=trial.suggest_int('max_depth', 4, 7),
-        learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15),
-        subsample=trial.suggest_float('subsample', 0.7, 1.0),
-        colsample_bytree=trial.suggest_float('colsample_bytree', 0.7, 1.0),
-        eval_metric='logloss',
-        use_label_encoder=False,
-        n_jobs=1,
-        verbosity=0,
+            n_estimators=trial.suggest_int('n_estimators', 60, 120),
+            max_depth=trial.suggest_int('max_depth', 4, 7),
+            learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15),
+            subsample=trial.suggest_float('subsample', 0.7, 1.0),
+            colsample_bytree=trial.suggest_float('colsample_bytree', 0.7, 1.0),
+            eval_metric='logloss',                # <-- Correct spot!
+            use_label_encoder=False,
+            n_jobs=1,
+            verbosity=0,
         )
         xt, xv, yt, yv = X_train_scaled, X_val_scaled, y_train, y_val
         if hasattr(xt, 'values'): xt = xt.values
@@ -287,16 +287,14 @@ if event_file is not None and today_file is not None:
             clf.fit(
                 xt, yt,
                 eval_set=[(xv, yv)],
-                eval_metric='logloss',
                 verbose=False,
                 early_stopping_rounds=12
             )
         except TypeError:
-        # Fallback for older xgboost versions
+        # Fallback for older xgboost versions that don't support early stopping
             clf.fit(
                 xt, yt,
                 eval_set=[(xv, yv)],
-                eval_metric='logloss',
                 verbose=False
             )
         preds = clf.predict_proba(xv)[:, 1]
