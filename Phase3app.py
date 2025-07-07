@@ -12,7 +12,6 @@ import catboost as cb
 from sklearn.isotonic import IsotonicRegression
 from sklearn.ensemble import GradientBoostingRegressor
 import optuna
-from datetime import datetime
 import matplotlib.pyplot as plt
 
 st.set_page_config("🏆 MLB HR Predictor — AI World Class", layout="wide")
@@ -235,10 +234,8 @@ if event_file is not None and today_file is not None:
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of features (no deduplication): {len(feature_cols)}")
 
-    # ==== STORE ORIGINAL CONTEXT COLUMNS ====
+    # ==== STORE ORIGINAL CONTEXT COLUMNS, GUARDED ====
     context_cols = ["player_name", "team", "game_time", "opposing_pitcher"]
-    context_cols = ["player_name", "team", "game_time", "opposing_pitcher"]
-    # Only keep columns that exist!
     context_cols_present = [c for c in context_cols if c in today_df.columns]
     if len(context_cols_present) < len(context_cols):
         missing = list(set(context_cols) - set(context_cols_present))
@@ -247,7 +244,7 @@ if event_file is not None and today_file is not None:
         st.error("No context columns available in today's file. Please check your input!")
         st.stop()
     orig_context = today_df[context_cols_present].copy()
-    
+
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
@@ -261,6 +258,10 @@ if event_file is not None and today_file is not None:
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
+    # === FIX: Reset y_train/y_val index for XGBoost compatibility! ===
+    y_train = y_train.reset_index(drop=True)
+    y_val = y_val.reset_index(drop=True)
+
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
