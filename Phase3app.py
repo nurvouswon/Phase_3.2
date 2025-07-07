@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 st.set_page_config("🏆 MLB HR Predictor — AI World Class", layout="wide")
 st.title("🏆 MLB Home Run Predictor — AI-Powered Best in the World")
 
-# ==== FILE HELPERS ====
 def safe_read(path):
     fn = str(getattr(path, 'name', path)).lower()
     if fn.endswith('.parquet'):
@@ -74,16 +73,14 @@ def downcast_df(df):
         df[col] = pd.to_numeric(df[col], downcast='integer')
     return df
 
-def nan_inf_check(df, name):
-    numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)
+def nan_inf_check(X, name):
+    arr = np.asarray(X)
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
-# ==== Weather Multiplier & Rating ====
 def compute_weather_multiplier(row):
     multiplier = 1.0
     if 'wind_mph' in row and not pd.isna(row['wind_mph']):
@@ -112,7 +109,6 @@ def weather_rating(multiplier):
     else:
         return "Excellent"
 
-# ==== ROLLING STREAK FEATURES (optimized and robust) ====
 def add_streak_features(event_df, today_df):
     event_df = event_df.sort_values(['player_name', 'game_date'])
     event_df['hr_5g'] = (
@@ -149,7 +145,6 @@ def assign_streak_label(row):
         return "Breakout Watch"
     return ""
 
-# ==== Custom Weather/Context Overlay Columns ====
 def rate_wind_speed(ws):
     if pd.isnull(ws): return ""
     if ws >= 15: return "Extreme Wind"
@@ -197,7 +192,6 @@ def combine_weather_labels(row):
     ]
     return ", ".join([p for p in parts if p])
 
-# ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
@@ -227,13 +221,11 @@ if event_file is not None and today_file is not None:
     st.success("✅ 'hr_outcome' column found in event-level data.")
     st.dataframe(event_df[target_col].value_counts(dropna=False).reset_index(), use_container_width=True)
 
-    # ==== ALL MUTUAL FEATURES ====
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of features (no deduplication): {len(feature_cols)}")
 
-    # ==== STORE ORIGINAL CONTEXT COLUMNS, GUARDED ====
     context_cols = ["player_name", "pitcher_team_code", "park"]
     context_cols_present = [c for c in context_cols if c in today_df.columns]
     if len(context_cols_present) < len(context_cols):
@@ -250,6 +242,10 @@ if event_file is not None and today_file is not None:
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
+    # ==== ENFORCE ALL NUMERIC DTYPE (NO DECIMAL/STRING BUGS) ====
+    X = np.asarray(X, dtype=np.float32)
+    X_today = np.asarray(X_today, dtype=np.float32)
+    y = pd.to_numeric(y, errors='coerce').fillna(0).astype(int)
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
@@ -257,15 +253,14 @@ if event_file is not None and today_file is not None:
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
-    y_train = np.asarray(y_train).ravel()
-    y_val = np.asarray(y_val).ravel()
+    y_train = np.asarray(y_train, dtype=np.int32).reshape(-1)
+    y_val = np.asarray(y_val, dtype=np.int32).reshape(-1)
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # ==== OPTUNA XGBOOST ====
     st.write("Running Optuna for XGBoost hyperparameter tuning...")
     def optuna_objective_xgb(trial):
         clf = xgb.XGBClassifier(
@@ -280,13 +275,8 @@ if event_file is not None and today_file is not None:
             verbosity=0,
         )
         xt, xv, yt, yv = X_train_scaled, X_val_scaled, y_train, y_val
-        if hasattr(xt, 'values'): xt = xt.values
-        if hasattr(xv, 'values'): xv = xv.values
-        yt = np.asarray(yt)
-        yv = np.asarray(yv)
-        # Defensive: Remove any NaN/Inf for trial
         if np.isnan(xt).any() or np.isinf(xt).any() or np.isnan(xv).any() or np.isinf(xv).any():
-            return 0.5  # Penalty for invalid data
+            return 0.5
         if np.isnan(yt).any() or np.isinf(yt).any() or np.isnan(yv).any() or np.isinf(yv).any():
             return 0.5
         clf.fit(
@@ -300,6 +290,7 @@ if event_file is not None and today_file is not None:
     study_xgb = optuna.create_study(direction='maximize')
     study_xgb.optimize(optuna_objective_xgb, n_trials=12)
     xgb_clf = xgb.XGBClassifier(**study_xgb.best_params, eval_metric='logloss', use_label_encoder=False)
+    xgb_clf.fit(X_train_scaled, y_train)
 
     # ==== Train all models ====
     st.write("Training final ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
@@ -324,7 +315,6 @@ if event_file is not None and today_file is not None:
             st.warning(f"{name} training failed: {e}")
     ensemble.fit(X_train_scaled, y_train)
 
-    # ==== Calibration (Isotonic Regression) ====
     st.write("Calibrating probabilities with isotonic regression...")
     y_val_pred = ensemble.predict_proba(X_val_scaled)[:, 1]
     ir = IsotonicRegression(out_of_bounds="clip")
@@ -333,15 +323,10 @@ if event_file is not None and today_file is not None:
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    # ==== POST-PROCESSING: Add meta, overlays, context ====
     today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
     today_df['weather_rating'] = today_df['weather_multiplier'].apply(weather_rating)
-
-    # Add rolling streaks and labels
     today_df = add_streak_features(event_df, today_df)
     today_df['streak_label'] = today_df.apply(assign_streak_label, axis=1)
-
-    # Add weather/context overlays
     today_df['wind_speed_rating'] = today_df['wind_mph'].apply(rate_wind_speed) if 'wind_mph' in today_df else ""
     today_df['humidity_rating'] = today_df['humidity'].apply(rate_humidity) if 'humidity' in today_df else ""
     today_df['temperature_rating'] = today_df['temp'].apply(rate_temperature) if 'temp' in today_df else ""
@@ -349,7 +334,6 @@ if event_file is not None and today_file is not None:
     today_df['wind_dir_rating'] = today_df['wind_dir_string'].apply(rate_wind_dir) if 'wind_dir_string' in today_df else ""
     today_df['weather_labels'] = today_df.apply(combine_weather_labels, axis=1)
 
-    # Meta-ML rank boosting (top 10 focus, but show 30)
     today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
     today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
     today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
@@ -364,11 +348,8 @@ if event_file is not None and today_file is not None:
     meta_booster.fit(X_meta, y_meta)
     today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
     today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
-
-    # ==== RE-MERGE ORIGINAL CONTEXT COLUMNS TO FIX MISSING DATA ====
     today_df = today_df.merge(orig_context, on="player_name", how="left")
 
-    # ==== FINAL TOP 30 LEADERBOARD ====
     desired_cols = [
         "player_name", "pitcher_team_code", "park",
         "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
