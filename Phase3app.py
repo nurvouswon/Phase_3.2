@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
@@ -10,15 +10,13 @@ import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingRegressor
 import optuna
-from scipy.stats import ks_2samp
 from datetime import datetime
 import matplotlib.pyplot as plt
 
-st.set_page_config("🏆 MLB HR Predictor — Best-in-Class AI", layout="wide")
-st.title("🏆 MLB Home Run Predictor — Best-in-Class AI Ensemble with Context")
+st.set_page_config("🏆 MLB HR Predictor — AI World Class", layout="wide")
+st.title("🏆 MLB Home Run Predictor — AI-Powered Best in the World")
 
 # ==== FILE HELPERS ====
 def safe_read(path):
@@ -127,7 +125,6 @@ def add_streak_features(event_df, today_df):
         event_df.groupby('player_name')['hr_outcome']
         .transform(lambda x: x.rolling(window=10, min_periods=1).sum().shift(1))
     )
-    # Cold streak: consecutive games without HR up to today
     def cold_streak(x):
         streak = 0
         for val in reversed(x):
@@ -238,6 +235,10 @@ if event_file is not None and today_file is not None:
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of features (no deduplication): {len(feature_cols)}")
 
+    # ==== STORE ORIGINAL CONTEXT COLUMNS ====
+    context_cols = ["player_name", "team", "game_time", "opposing_pitcher"]
+    orig_context = today_df[context_cols].copy()
+
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
@@ -256,49 +257,197 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # ==== OPTUNA-TUNED XGB FOR TOP-10 FOCUS ====
-    st.info("Tuning XGBoost (Optuna, Top-10 HR accuracy focus)...")
-    def opt_objective(trial):
+    # ==== MODEL TUNING WITH OPTUNA ====
+    import optuna
+
+    # ---- XGB ----
+    def optuna_objective_xgb(trial):
         clf = xgb.XGBClassifier(
             n_estimators=trial.suggest_int('n_estimators', 70, 140),
-            max_depth=trial.suggest_int('max_depth', 4, 8),
-            learning_rate=trial.suggest_loguniform('learning_rate', 0.025, 0.12),
+            max_depth=trial.suggest_int('max_depth', 3, 8),
+            learning_rate=trial.suggest_loguniform('learning_rate', 0.02, 0.14),
             subsample=trial.suggest_float('subsample', 0.8, 1.0),
-            colsample_bytree=trial.suggest_float('colsample_bytree', 0.8, 1.0),
+            colsample_bytree=trial.suggest_float('colsample_bytree', 0.7, 1.0),
             min_child_weight=trial.suggest_int('min_child_weight', 1, 10),
             gamma=trial.suggest_float('gamma', 0, 3),
-            reg_alpha=trial.suggest_float('reg_alpha', 0, 1.0),
-            reg_lambda=trial.suggest_float('reg_lambda', 0, 1.0),
+            reg_alpha=trial.suggest_float('reg_alpha', 0, 1.5),
+            reg_lambda=trial.suggest_float('reg_lambda', 0, 1.5),
             eval_metric='logloss',
             use_label_encoder=False,
             random_state=42,
             n_jobs=1,
         )
+        clf.fit(
+            X_train_scaled, y_train,
+            eval_set=[(X_val_scaled, y_val)],
+            early_stopping_rounds=12, verbose=False
+        )
+        y_pred = clf.predict_proba(X_val_scaled)[:, 1]
+        top_10_idx = np.argsort(y_pred)[-10:]
+        return y_val.iloc[top_10_idx].mean()
+
+    study_xgb = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+    study_xgb.optimize(optuna_objective_xgb, n_trials=18)
+    params_xgb = study_xgb.best_params
+
+    # ---- LGB ----
+    def optuna_objective_lgb(trial):
+        clf = lgb.LGBMClassifier(
+            n_estimators=trial.suggest_int('n_estimators', 70, 140),
+            max_depth=trial.suggest_int('max_depth', 3, 8),
+            learning_rate=trial.suggest_loguniform('learning_rate', 0.02, 0.14),
+            subsample=trial.suggest_float('subsample', 0.8, 1.0),
+            colsample_bytree=trial.suggest_float('colsample_bytree', 0.7, 1.0),
+            min_child_weight=trial.suggest_int('min_child_weight', 1, 10),
+            reg_alpha=trial.suggest_float('reg_alpha', 0, 1.5),
+            reg_lambda=trial.suggest_float('reg_lambda', 0, 1.5),
+            random_state=42,
+            n_jobs=1,
+        )
+        clf.fit(
+            X_train_scaled, y_train,
+            eval_set=[(X_val_scaled, y_val)],
+            early_stopping_rounds=12, verbose=False
+        )
+        y_pred = clf.predict_proba(X_val_scaled)[:, 1]
+        top_10_idx = np.argsort(y_pred)[-10:]
+        return y_val.iloc[top_10_idx].mean()
+
+    study_lgb = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+    study_lgb.optimize(optuna_objective_lgb, n_trials=18)
+    params_lgb = study_lgb.best_params
+
+    # ---- CAT ----
+    def optuna_objective_cat(trial):
+        clf = cb.CatBoostClassifier(
+            iterations=trial.suggest_int('iterations', 80, 180),
+            depth=trial.suggest_int('depth', 3, 8),
+            learning_rate=trial.suggest_loguniform('learning_rate', 0.02, 0.14),
+            l2_leaf_reg=trial.suggest_float('l2_leaf_reg', 1, 9),
+            border_count=trial.suggest_int('border_count', 32, 255),
+            random_seed=42,
+            verbose=0,
+            thread_count=1
+        )
+        clf.fit(X_train_scaled, y_train, eval_set=(X_val_scaled, y_val), early_stopping_rounds=12, verbose=False)
+        y_pred = clf.predict_proba(X_val_scaled)[:, 1]
+        top_10_idx = np.argsort(y_pred)[-10:]
+        return y_val.iloc[top_10_idx].mean()
+
+    study_cat = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+    study_cat.optimize(optuna_objective_cat, n_trials=14)
+    params_cat = study_cat.best_params
+
+    # ---- RF ----
+    def optuna_objective_rf(trial):
+        clf = RandomForestClassifier(
+            n_estimators=trial.suggest_int('n_estimators', 70, 160),
+            max_depth=trial.suggest_int('max_depth', 5, 14),
+            min_samples_split=trial.suggest_int('min_samples_split', 2, 10),
+            min_samples_leaf=trial.suggest_int('min_samples_leaf', 1, 5),
+            max_features=trial.suggest_categorical('max_features', ['sqrt', 'log2']),
+            random_state=42,
+            n_jobs=1
+        )
         clf.fit(X_train_scaled, y_train)
         y_pred = clf.predict_proba(X_val_scaled)[:, 1]
         top_10_idx = np.argsort(y_pred)[-10:]
-        hr_rate_in_top10 = y_val.iloc[top_10_idx].mean()
-        return hr_rate_in_top10
+        return y_val.iloc[top_10_idx].mean()
 
-    study = optuna.create_study(direction='maximize')
-    study.optimize(opt_objective, n_trials=25)  # Increase for more accuracy if possible
+    study_rf = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+    study_rf.optimize(optuna_objective_rf, n_trials=12)
+    params_rf = study_rf.best_params
 
-    st.success(f"Optuna best params: {study.best_params}")
+    # ---- GB ----
+    def optuna_objective_gb(trial):
+        clf = GradientBoostingClassifier(
+            n_estimators=trial.suggest_int('n_estimators', 60, 120),
+            max_depth=trial.suggest_int('max_depth', 3, 7),
+            learning_rate=trial.suggest_loguniform('learning_rate', 0.03, 0.13),
+            subsample=trial.suggest_float('subsample', 0.8, 1.0),
+            min_samples_split=trial.suggest_int('min_samples_split', 2, 10),
+            min_samples_leaf=trial.suggest_int('min_samples_leaf', 1, 5),
+            random_state=42
+        )
+        clf.fit(X_train_scaled, y_train)
+        y_pred = clf.predict_proba(X_val_scaled)[:, 1]
+        top_10_idx = np.argsort(y_pred)[-10:]
+        return y_val.iloc[top_10_idx].mean()
 
-    xgb_best = xgb.XGBClassifier(**study.best_params, eval_metric='logloss', use_label_encoder=False, random_state=42)
+    study_gb = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+    study_gb.optimize(optuna_objective_gb, n_trials=10)
+    params_gb = study_gb.best_params
+
+    # ---- LOGISTIC REGRESSION ----
+    def optuna_objective_lr(trial):
+        clf = LogisticRegression(
+            penalty=trial.suggest_categorical('penalty', ['l2', 'none']),
+            C=trial.suggest_loguniform('C', 0.01, 10.0),
+            solver='lbfgs',
+            max_iter=600,
+            random_state=42
+        )
+        clf.fit(X_train_scaled, y_train)
+        y_pred = clf.predict_proba(X_val_scaled)[:, 1]
+        top_10_idx = np.argsort(y_pred)[-10:]
+        return y_val.iloc[top_10_idx].mean()
+
+    study_lr = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=2),
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+    study_lr.optimize(optuna_objective_lr, n_trials=8)
+    params_lr = study_lr.best_params
+
+    # ==== REFIT ALL MODELS ON FULL TRAINING DATA ====
+    xgb_best = xgb.XGBClassifier(**params_xgb, eval_metric='logloss', use_label_encoder=False, random_state=42)
     xgb_best.fit(X_train_scaled, y_train)
 
-    # ==== ENSEMBLE WITH OTHER ML MODELS ====
-    lgb_clf = lgb.LGBMClassifier(n_estimators=100, random_state=42)
-    cat_clf = cb.CatBoostClassifier(iterations=100, verbose=0, random_state=42)
-    rf_clf = RandomForestClassifier(n_estimators=80, random_state=42)
+    lgb_best = lgb.LGBMClassifier(**params_lgb, random_state=42)
+    lgb_best.fit(X_train_scaled, y_train)
 
+    cat_best = cb.CatBoostClassifier(**params_cat, random_seed=42, verbose=0, thread_count=1)
+    cat_best.fit(X_train_scaled, y_train)
+
+    rf_best = RandomForestClassifier(**params_rf, random_state=42)
+    rf_best.fit(X_train_scaled, y_train)
+
+    gb_best = GradientBoostingClassifier(**params_gb, random_state=42)
+    gb_best.fit(X_train_scaled, y_train)
+
+    lr_best = LogisticRegression(**params_lr, solver='lbfgs', max_iter=600, random_state=42)
+    lr_best.fit(X_train_scaled, y_train)
+
+    # ==== ENSEMBLE ALL TUNED MODELS ====
     ensemble = VotingClassifier(
         estimators=[
             ('xgb', xgb_best),
-            ('lgb', lgb_clf),
-            ('cat', cat_clf),
-            ('rf', rf_clf)
+            ('lgb', lgb_best),
+            ('cat', cat_best),
+            ('rf', rf_best),
+            ('gb', gb_best),
+            ('lr', lr_best)
         ],
         voting='soft', n_jobs=1
     )
@@ -349,6 +498,9 @@ if event_file is not None and today_file is not None:
     today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
     today_df['weather_rating'] = today_df['weather_multiplier'].apply(weather_rating)
 
+    # ==== RE-MERGE ORIGINAL CONTEXT COLUMNS TO FIX MISSING DATA ====
+    today_df = today_df.merge(orig_context, on="player_name", how="left")
+
     # ==== FINAL TOP 30 LEADERBOARD ====
     desired_cols = [
         "player_name", "team", "game_time", "opposing_pitcher",
@@ -370,7 +522,7 @@ if event_file is not None and today_file is not None:
         file_name=f"top{top_n}_leaderboard.csv"
     )
 
-    # (Optional) Visualize distribution of HR probability for top 30
+    # Visual: HR Probability Distribution (Top 30)
     st.subheader("📊 HR Probability Distribution (Top 30)")
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
@@ -379,7 +531,7 @@ if event_file is not None and today_file is not None:
     ax.set_ylabel('Player')
     st.pyplot(fig)
 
-    # (Optional) Show feature importance from meta model (for transparency)
+    # Visual: Meta-Ranker Feature Importance
     st.subheader("🔎 Meta-Ranker Feature Importance")
     meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
     st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
