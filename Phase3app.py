@@ -358,31 +358,31 @@ if event_file is not None and today_file is not None:
     cols = [c for c in desired_cols if c in today_df.columns]
     leaderboard = today_df[cols].copy()
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
-leaderboard["weather_multiplier"] = leaderboard["weather_multiplier"].round(3)
-top_n = 30
-leaderboard_top = leaderboard.head(top_n)
-st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI, Weather & Streak Context)**")
-st.dataframe(leaderboard_top, use_container_width=True)
-st.download_button(
-    f"⬇️ Download Top {top_n} Leaderboard CSV",
-    data=leaderboard_top.to_csv(index=False),
-    file_name=f"top{top_n}_leaderboard.csv"
-)
+    leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
+    leaderboard["weather_multiplier"] = leaderboard["weather_multiplier"].round(3)
+    top_n = 30
+    leaderboard_top = leaderboard.head(top_n)
+    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI, Weather & Streak Context)**")
+    st.dataframe(leaderboard_top, use_container_width=True)
+    st.download_button(
+        f"⬇️ Download Top {top_n} Leaderboard CSV",
+        data=leaderboard_top.to_csv(index=False),
+        file_name=f"top{top_n}_leaderboard.csv"
+    )
 
-# (Optional) Visualize distribution of HR probability for top 30
-st.subheader("📊 HR Probability Distribution (Top 30)")
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
-ax.invert_yaxis()
-ax.set_xlabel('HR Probability')
-ax.set_ylabel('Player')
-st.pyplot(fig)
+    # (Optional) Visualize distribution of HR probability for top 30
+    st.subheader("📊 HR Probability Distribution (Top 30)")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
+    ax.invert_yaxis()
+    ax.set_xlabel('HR Probability')
+    ax.set_ylabel('Player')
+    st.pyplot(fig)
 
-# (Optional) Show feature importance from meta model (for transparency)
-st.subheader("🔎 Meta-Ranker Feature Importance")
-meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
-st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
+    # (Optional) Show feature importance from meta model (for transparency)
+    st.subheader("🔎 Meta-Ranker Feature Importance")
+    meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
+    st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
