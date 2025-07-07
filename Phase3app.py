@@ -258,7 +258,6 @@ if event_file is not None and today_file is not None:
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
-    # === FIX: Reset y_train/y_val index for XGBoost compatibility! ===
     y_train = y_train.reset_index(drop=True)
     y_val = y_val.reset_index(drop=True)
 
@@ -267,10 +266,22 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
+    # === Robustness: No NaNs, No Infs, y is 1D float ===
+    for arr, name in [(X_train_scaled, "X_train_scaled"), (X_val_scaled, "X_val_scaled"),
+                      (y_train, "y_train"), (y_val, "y_val")]:
+        if np.isnan(arr).any():
+            st.error(f"NaN values detected in {name}! Please fix your data.")
+            st.stop()
+        if np.isinf(arr).any():
+            st.error(f"Infinite values detected in {name}! Please fix your data.")
+            st.stop()
+    y_train = np.asarray(y_train).astype(np.float32).ravel()
+    y_val = np.asarray(y_val).astype(np.float32).ravel()
+
     # ==== MODEL TUNING WITH OPTUNA ====
     import optuna
 
-    # ---- XGB ----
+    # ---- XGBoost ----
     def optuna_objective_xgb(trial):
         clf = xgb.XGBClassifier(
             n_estimators=trial.suggest_int('n_estimators', 70, 140),
@@ -294,7 +305,7 @@ if event_file is not None and today_file is not None:
         )
         y_pred = clf.predict_proba(X_val_scaled)[:, 1]
         top_10_idx = np.argsort(y_pred)[-10:]
-        return y_val.iloc[top_10_idx].mean()
+        return y_val[top_10_idx].mean()
 
     study_xgb = optuna.create_study(
         direction='maximize',
@@ -304,7 +315,7 @@ if event_file is not None and today_file is not None:
     study_xgb.optimize(optuna_objective_xgb, n_trials=18)
     params_xgb = study_xgb.best_params
 
-    # ---- LGB ----
+    # ---- LightGBM ----
     def optuna_objective_lgb(trial):
         clf = lgb.LGBMClassifier(
             n_estimators=trial.suggest_int('n_estimators', 70, 140),
@@ -325,7 +336,7 @@ if event_file is not None and today_file is not None:
         )
         y_pred = clf.predict_proba(X_val_scaled)[:, 1]
         top_10_idx = np.argsort(y_pred)[-10:]
-        return y_val.iloc[top_10_idx].mean()
+        return y_val[top_10_idx].mean()
 
     study_lgb = optuna.create_study(
         direction='maximize',
@@ -335,7 +346,7 @@ if event_file is not None and today_file is not None:
     study_lgb.optimize(optuna_objective_lgb, n_trials=18)
     params_lgb = study_lgb.best_params
 
-    # ---- CAT ----
+    # ---- CatBoost ----
     def optuna_objective_cat(trial):
         clf = cb.CatBoostClassifier(
             iterations=trial.suggest_int('iterations', 80, 180),
@@ -350,7 +361,7 @@ if event_file is not None and today_file is not None:
         clf.fit(X_train_scaled, y_train, eval_set=(X_val_scaled, y_val), early_stopping_rounds=12, verbose=False)
         y_pred = clf.predict_proba(X_val_scaled)[:, 1]
         top_10_idx = np.argsort(y_pred)[-10:]
-        return y_val.iloc[top_10_idx].mean()
+        return y_val[top_10_idx].mean()
 
     study_cat = optuna.create_study(
         direction='maximize',
@@ -360,7 +371,7 @@ if event_file is not None and today_file is not None:
     study_cat.optimize(optuna_objective_cat, n_trials=14)
     params_cat = study_cat.best_params
 
-    # ---- RF ----
+    # ---- RandomForest ----
     def optuna_objective_rf(trial):
         clf = RandomForestClassifier(
             n_estimators=trial.suggest_int('n_estimators', 70, 160),
@@ -374,7 +385,7 @@ if event_file is not None and today_file is not None:
         clf.fit(X_train_scaled, y_train)
         y_pred = clf.predict_proba(X_val_scaled)[:, 1]
         top_10_idx = np.argsort(y_pred)[-10:]
-        return y_val.iloc[top_10_idx].mean()
+        return y_val[top_10_idx].mean()
 
     study_rf = optuna.create_study(
         direction='maximize',
@@ -384,7 +395,7 @@ if event_file is not None and today_file is not None:
     study_rf.optimize(optuna_objective_rf, n_trials=12)
     params_rf = study_rf.best_params
 
-    # ---- GB ----
+    # ---- GradientBoostingClassifier ----
     def optuna_objective_gb(trial):
         clf = GradientBoostingClassifier(
             n_estimators=trial.suggest_int('n_estimators', 60, 120),
@@ -398,7 +409,7 @@ if event_file is not None and today_file is not None:
         clf.fit(X_train_scaled, y_train)
         y_pred = clf.predict_proba(X_val_scaled)[:, 1]
         top_10_idx = np.argsort(y_pred)[-10:]
-        return y_val.iloc[top_10_idx].mean()
+        return y_val[top_10_idx].mean()
 
     study_gb = optuna.create_study(
         direction='maximize',
@@ -408,7 +419,7 @@ if event_file is not None and today_file is not None:
     study_gb.optimize(optuna_objective_gb, n_trials=10)
     params_gb = study_gb.best_params
 
-    # ---- LOGISTIC REGRESSION ----
+    # ---- LogisticRegression ----
     def optuna_objective_lr(trial):
         clf = LogisticRegression(
             penalty=trial.suggest_categorical('penalty', ['l2', 'none']),
@@ -420,7 +431,7 @@ if event_file is not None and today_file is not None:
         clf.fit(X_train_scaled, y_train)
         y_pred = clf.predict_proba(X_val_scaled)[:, 1]
         top_10_idx = np.argsort(y_pred)[-10:]
-        return y_val.iloc[top_10_idx].mean()
+        return y_val[top_10_idx].mean()
 
     study_lr = optuna.create_study(
         direction='maximize',
