@@ -237,8 +237,17 @@ if event_file is not None and today_file is not None:
 
     # ==== STORE ORIGINAL CONTEXT COLUMNS ====
     context_cols = ["player_name", "team", "game_time", "opposing_pitcher"]
-    orig_context = today_df[context_cols].copy()
-
+    context_cols = ["player_name", "team", "game_time", "opposing_pitcher"]
+    # Only keep columns that exist!
+    context_cols_present = [c for c in context_cols if c in today_df.columns]
+    if len(context_cols_present) < len(context_cols):
+        missing = list(set(context_cols) - set(context_cols_present))
+        st.warning(f"Some expected context columns are missing from today's file: {missing}")
+    if not context_cols_present:
+        st.error("No context columns available in today's file. Please check your input!")
+        st.stop()
+    orig_context = today_df[context_cols_present].copy()
+    
     X = clean_X(event_df[feature_cols])
     y = event_df[target_col]
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
