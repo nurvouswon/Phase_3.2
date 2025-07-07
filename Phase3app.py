@@ -124,19 +124,16 @@ if event_file is not None and today_file is not None:
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
-    # --- Drop low variance features (robust, fast) ---
-    def drop_low_variance(X, threshold=0.98):
-        to_drop = []
-        for c in X.columns:
-            if X[c].nunique() <= 1 or (X[c].value_counts(normalize=True).iloc[0] > threshold):
-                to_drop.append(c)
-        return X.drop(columns=to_drop, errors='ignore')
+    nan_inf_check(X, "X features")
+    nan_inf_check(X_today, "X_today features")
 
-    X = drop_low_variance(X)
-    X_today = X_today[X.columns]
-
-    # --- Automated feature selection (top N by RandomForest importance) ---
-    N_KEEP = 60  # Change this as desired; slider if you want
+    # ==== FEATURE SELECTION SLIDER ====
+    max_feats = min(200, len(X.columns))
+    N_KEEP = st.slider(
+        "🔧 Select number of top features (by importance, after dropping low-variance columns)",
+        min_value=8, max_value=max_feats, value=min(60, max_feats), step=1,
+        help="Reduce this if your RAM or speed is a problem. More = more data, slower training."
+    )
     st.info(f"Pruning to top {N_KEEP} features by mean importance (tree models)...")
     try:
         rf_tmp = RandomForestClassifier(n_estimators=25, max_depth=4, n_jobs=1, random_state=42)
@@ -149,9 +146,6 @@ if event_file is not None and today_file is not None:
         st.success(f"Feature columns reduced to {len(top_feats)} most important predictors.")
     except Exception as e:
         st.warning(f"Feature selection step failed: {e}")
-
-    nan_inf_check(X, "X features")
-    nan_inf_check(X_today, "X_today features")
 
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
@@ -260,11 +254,15 @@ if event_file is not None and today_file is not None:
     today_df['hr_probability'] = y_today_pred_cal
 
     # =========== POST-PREDICTION RANK BOOSTER (NO LABELS NEEDED) ===========
-    st.write("🔮 Post-Prediction Top 10 Booster (AI meta-prediction)...")
+    st.write("🔮 Post-Prediction Top N Booster (AI meta-prediction)...")
     # Create synthetic "rank gap" features on today_df
+    # ============= TOP N LEADERBOARD SLIDER =============
+    top_n = st.slider(
+        "Select leaderboard size (Top N to display)",
+        min_value=5, max_value=50, value=30, step=1,
+        help="How many players to show in the final leaderboard below."
+    )
     today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
-    topN = 15  # Use top 15 for broader learning, but only show 10 in leaderboard
-
     today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
     today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
     today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
@@ -287,7 +285,7 @@ if event_file is not None and today_file is not None:
     today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
     today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
 
-    # ==== TOP 10 PRECISION LEADERBOARD ====
+    # ==== TOP N PRECISION LEADERBOARD ====
     leaderboard_cols = []
     if "player_name" in today_df.columns:
         leaderboard_cols.append("player_name")
@@ -295,8 +293,7 @@ if event_file is not None and today_file is not None:
     leaderboard = today_df[leaderboard_cols]
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
     leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
-    top_n = 10
-    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI Top 10 Booster)**")
+    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI Top N Booster)**")
     leaderboard_top = leaderboard.head(top_n)
     st.dataframe(leaderboard_top, use_container_width=True)
     st.download_button(
