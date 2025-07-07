@@ -269,34 +269,37 @@ if event_file is not None and today_file is not None:
     st.write("Running Optuna for XGBoost hyperparameter tuning...")
     def optuna_objective_xgb(trial):
         clf = xgb.XGBClassifier(
-        n_estimators=trial.suggest_int('n_estimators', 60, 120),
-        max_depth=trial.suggest_int('max_depth', 4, 7),
-        learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15),
-        subsample=trial.suggest_float('subsample', 0.7, 1.0),
-        colsample_bytree=trial.suggest_float('colsample_bytree', 0.7, 1.0),
-        eval_metric='logloss',
-        use_label_encoder=False,
-        n_jobs=1,
-        verbosity=0,
-    )
-    # Defensive: Remove any NaN/Inf for trial
-    xt, xv, yt, yv = X_train_scaled, X_val_scaled, y_train, y_val
-    if hasattr(xt, 'values'): xt = xt.values
-    if hasattr(xv, 'values'): xv = xv.values
-    yt = np.asarray(yt)
-    yv = np.asarray(yv)
-    # Remove any rows with nan/inf (should not exist after nan_inf_check, but double check)
-    if np.isnan(xt).any() or np.isinf(xt).any() or np.isnan(xv).any() or np.isinf(xv).any():
-        return 0.5  # Penalty for invalid data
-    if np.isnan(yt).any() or np.isinf(yt).any() or np.isnan(yv).any() or np.isinf(yv).any():
-        return 0.5
-    clf.fit(
-        xt, yt,
-        eval_set=[(xv, yv)],
-        early_stopping_rounds=12
-    )
-    preds = clf.predict_proba(xv)[:, 1]
-    return roc_auc_score(yv, preds)
+            n_estimators=trial.suggest_int('n_estimators', 60, 120),
+            max_depth=trial.suggest_int('max_depth', 4, 7),
+            learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15),
+            subsample=trial.suggest_float('subsample', 0.7, 1.0),
+            colsample_bytree=trial.suggest_float('colsample_bytree', 0.7, 1.0),
+            eval_metric='logloss',
+            use_label_encoder=False,
+            n_jobs=1,
+            verbosity=0,
+        )
+        xt, xv, yt, yv = X_train_scaled, X_val_scaled, y_train, y_val
+        if hasattr(xt, 'values'): xt = xt.values
+        if hasattr(xv, 'values'): xv = xv.values
+        yt = np.asarray(yt)
+        yv = np.asarray(yv)
+        # Defensive: Remove any NaN/Inf for trial
+        if np.isnan(xt).any() or np.isinf(xt).any() or np.isnan(xv).any() or np.isinf(xv).any():
+            return 0.5  # Penalty for invalid data
+        if np.isnan(yt).any() or np.isinf(yt).any() or np.isnan(yv).any() or np.isinf(yv).any():
+            return 0.5
+        clf.fit(
+            xt, yt,
+            eval_set=[(xv, yv)],
+            early_stopping_rounds=12
+        )
+        preds = clf.predict_proba(xv)[:, 1]
+        return roc_auc_score(yv, preds)
+
+    study_xgb = optuna.create_study(direction='maximize')
+    study_xgb.optimize(optuna_objective_xgb, n_trials=12)
+    xgb_clf = xgb.XGBClassifier(**study_xgb.best_params, eval_metric='logloss', use_label_encoder=False)
 
     # ==== Train all models ====
     st.write("Training final ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
@@ -369,7 +372,8 @@ if event_file is not None and today_file is not None:
     desired_cols = [
         "player_name", "pitcher_team_code", "park",
         "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
-        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating", "park_rating", "wind_dir_rating", "weather_labels"
+        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating",
+        "park_rating", "wind_dir_rating", "weather_labels"
     ]
     cols = [c for c in desired_cols if c in today_df.columns]
     leaderboard = today_df[cols].copy()
