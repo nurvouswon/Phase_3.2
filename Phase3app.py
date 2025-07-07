@@ -257,8 +257,8 @@ if event_file is not None and today_file is not None:
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
-    y_train = y_train.reset_index(drop=True)
-    y_val = y_val.reset_index(drop=True)
+    y_train = np.asarray(y_train).ravel()
+    y_val = np.asarray(y_val).ravel()
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -279,13 +279,15 @@ if event_file is not None and today_file is not None:
             n_jobs=1,
             verbosity=0,
         )
+        yt = np.asarray(y_train).ravel()
+        yv = np.asarray(y_val).ravel()
         clf.fit(
-            X_train_scaled, y_train,
-            eval_set=[(X_val_scaled, y_val)],
+            X_train_scaled, yt,
+            eval_set=[(X_val_scaled, yv)],
             early_stopping_rounds=12
         )
         preds = clf.predict_proba(X_val_scaled)[:, 1]
-        return roc_auc_score(y_val, preds)
+        return roc_auc_score(yv, preds)
     study_xgb = optuna.create_study(direction='maximize')
     study_xgb.optimize(optuna_objective_xgb, n_trials=12)
     xgb_clf = xgb.XGBClassifier(**study_xgb.best_params, eval_metric='logloss', use_label_encoder=False)
@@ -361,8 +363,7 @@ if event_file is not None and today_file is not None:
     desired_cols = [
         "player_name", "pitcher_team_code", "park",
         "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
-        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating",
-        "park_rating", "wind_dir_rating", "weather_labels"
+        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating", "park_rating", "wind_dir_rating", "weather_labels"
     ]
     cols = [c for c in desired_cols if c in today_df.columns]
     leaderboard = today_df[cols].copy()
