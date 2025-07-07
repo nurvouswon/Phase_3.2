@@ -268,7 +268,7 @@ if event_file is not None and today_file is not None:
     # ==== OPTUNA XGBOOST ====
     st.write("Running Optuna for XGBoost hyperparameter tuning...")
     def optuna_objective_xgb(trial):
-    clf = xgb.XGBClassifier(
+        clf = xgb.XGBClassifier(
         n_estimators=trial.suggest_int('n_estimators', 60, 120),
         max_depth=trial.suggest_int('max_depth', 4, 7),
         learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15),
