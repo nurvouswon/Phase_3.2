@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, StackingClassifier, GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
@@ -10,7 +10,7 @@ import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.calibration import CalibratedClassifierCV
 import optuna
 import matplotlib.pyplot as plt
 
@@ -87,14 +87,14 @@ def nan_inf_check(df, name):
 # ==== Weather Multiplier & Rating ====
 def compute_weather_multiplier(row):
     multiplier = 1.0
-    if 'wind_speed' in row and not pd.isna(row['wind_speed']):
-        multiplier *= 1 + 0.01 * min(max(row['wind_speed'], 0), 20)
-    if 'temperature' in row and not pd.isna(row['temperature']):
-        if row['temperature'] >= 80:
+    if 'wind_mph' in row and not pd.isna(row['wind_mph']):
+        multiplier *= 1 + 0.01 * min(max(row['wind_mph'], 0), 20)
+    if 'temp' in row and not pd.isna(row['temp']):
+        if row['temp'] >= 80:
             multiplier *= 1.10
-        elif row['temperature'] >= 65:
+        elif row['temp'] >= 65:
             multiplier *= 1.05
-        elif row['temperature'] <= 50:
+        elif row['temp'] <= 50:
             multiplier *= 0.95
     if 'humidity' in row and not pd.isna(row['humidity']):
         if row['humidity'] >= 70:
@@ -235,7 +235,7 @@ if event_file is not None and today_file is not None:
     st.write(f"Number of features (no deduplication): {len(feature_cols)}")
 
     # ==== STORE ORIGINAL CONTEXT COLUMNS, GUARDED ====
-    context_cols = ["player_name", "teamcode", "time"]
+    context_cols = ["player_name", "pitcher_team_code", "park"]
     context_cols_present = [c for c in context_cols if c in today_df.columns]
     if len(context_cols_present) < len(context_cols):
         missing = list(set(context_cols) - set(context_cols_present))
@@ -266,38 +266,112 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # === Robustness: No NaNs, No Infs, y is 1D float ===
-    for arr, name in [(X_train_scaled, "X_train_scaled"), (X_val_scaled, "X_val_scaled"),
-                      (y_train, "y_train"), (y_val, "y_val")]:
-        if np.isnan(arr).any():
-            st.error(f"NaN values detected in {name}! Please fix your data.")
-            st.stop()
-        if np.isinf(arr).any():
-            st.error(f"Infinite values detected in {name}! Please fix your data.")
-            st.stop()
-    y_train = np.asarray(y_train).astype(np.float32).ravel()
-    y_val = np.asarray(y_val).astype(np.float32).ravel()
+    # ==== OPTUNA XGBOOST ====
+    st.write("Running Optuna for XGBoost hyperparameter tuning...")
+    def optuna_objective_xgb(trial):
+        clf = xgb.XGBClassifier(
+            n_estimators=trial.suggest_int('n_estimators', 60, 120),
+            max_depth=trial.suggest_int('max_depth', 4, 7),
+            learning_rate=trial.suggest_float('learning_rate', 0.02, 0.15),
+            subsample=trial.suggest_float('subsample', 0.7, 1.0),
+            colsample_bytree=trial.suggest_float('colsample_bytree', 0.7, 1.0),
+            eval_metric='logloss',
+            use_label_encoder=False,
+            n_jobs=1,
+            verbosity=0,
+        )
+        clf.fit(
+            X_train_scaled, y_train,
+            eval_set=[(X_val_scaled, y_val)],
+            early_stopping_rounds=12,
+            verbose=False
+        )
+        preds = clf.predict_proba(X_val_scaled)[:, 1]
+        return roc_auc_score(y_val, preds)
+    study_xgb = optuna.create_study(direction='maximize')
+    study_xgb.optimize(optuna_objective_xgb, n_trials=12)
+    xgb_clf = xgb.XGBClassifier(**study_xgb.best_params, eval_metric='logloss', use_label_encoder=False)
 
-    # ==== [Optuna/model/ensemble, post-processing, calibration goes here, unchanged] ====
-    # ==== [Assume this creates today_df['hr_probability'] and all overlay columns] ====
+    # ==== Train all models ====
+    st.write("Training final ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
+    lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
+    cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
+    rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
+    gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
+    lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+    models_for_ensemble = [
+        ('xgb', xgb_clf),
+        ('lgb', lgb_clf),
+        ('cat', cat_clf),
+        ('rf', rf_clf),
+        ('gb', gb_clf),
+        ('lr', lr_clf),
+    ]
+    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+    for name, model in models_for_ensemble:
+        try:
+            model.fit(X_train_scaled, y_train)
+        except Exception as e:
+            st.warning(f"{name} training failed: {e}")
+    ensemble.fit(X_train_scaled, y_train)
+
+    # ==== Calibration (Isotonic Regression) ====
+    st.write("Calibrating probabilities with isotonic regression...")
+    y_val_pred = ensemble.predict_proba(X_val_scaled)[:, 1]
+    ir = IsotonicRegression(out_of_bounds="clip")
+    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+    y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
+    y_today_pred_cal = ir.transform(y_today_pred)
+    today_df['hr_probability'] = y_today_pred_cal
+
+    # ==== POST-PROCESSING: Add meta, overlays, context ====
+    today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
+    today_df['weather_rating'] = today_df['weather_multiplier'].apply(weather_rating)
+
+    # Add rolling streaks and labels
+    today_df = add_streak_features(event_df, today_df)
+    today_df['streak_label'] = today_df.apply(assign_streak_label, axis=1)
+
+    # Add weather/context overlays
+    today_df['wind_speed_rating'] = today_df['wind_mph'].apply(rate_wind_speed) if 'wind_mph' in today_df else ""
+    today_df['humidity_rating'] = today_df['humidity'].apply(rate_humidity) if 'humidity' in today_df else ""
+    today_df['temperature_rating'] = today_df['temp'].apply(rate_temperature) if 'temp' in today_df else ""
+    today_df['park_rating'] = today_df['park'].apply(rate_park) if 'park' in today_df else ""
+    today_df['wind_dir_rating'] = today_df['wind_dir_string'].apply(rate_wind_dir) if 'wind_dir_string' in today_df else ""
+    today_df['weather_labels'] = today_df.apply(combine_weather_labels, axis=1)
+
+    # Meta-ML rank boosting (top 10 focus, but show 30)
+    today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
+    today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
+    today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
+    today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
+    meta_pseudo_y = today_df['hr_probability'].copy()
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.15
+    meta_features = ['hr_probability', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
+    X_meta = today_df[meta_features].values
+    y_meta = meta_pseudo_y.values
+    meta_booster = GradientBoostingRegressor(n_estimators=80, max_depth=3, learning_rate=0.1)
+    meta_booster.fit(X_meta, y_meta)
+    today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
+    today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
 
     # ==== RE-MERGE ORIGINAL CONTEXT COLUMNS TO FIX MISSING DATA ====
     today_df = today_df.merge(orig_context, on="player_name", how="left")
 
     # ==== FINAL TOP 30 LEADERBOARD ====
     desired_cols = [
-        "player_name", "teamcode", "time",
+        "player_name", "pitcher_team_code", "park",
         "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
-        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating", "park_rating", "wind_dir_rating", "weather_labels"
+        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating", "park_rating", "wind_dir_rating, "weather_labels"
     ]
     cols = [c for c in desired_cols if c in today_df.columns]
     leaderboard = today_df[cols].copy()
 
-    # Robust: Only round if columns exist
     for col, n in [("hr_probability", 4), ("meta_hr_rank_score", 4), ("weather_multiplier", 3)]:
         if col in leaderboard.columns:
             leaderboard[col] = leaderboard[col].round(n)
-    st.write("Columns in leaderboard:", leaderboard.columns.tolist())  # Debug
+    st.write("Columns in leaderboard:", leaderboard.columns.tolist())  # For debug
 
     top_n = 30
     leaderboard_top = leaderboard.head(top_n)
