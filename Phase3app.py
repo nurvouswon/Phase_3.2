@@ -87,6 +87,36 @@ def nan_inf_check(df, name):
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
+# ==== Weather Multiplier & Rating ====
+def compute_weather_multiplier(row):
+    # You can change this logic for your own weather/park factors!
+    multiplier = 1.0
+    if 'wind_speed' in row and not pd.isna(row['wind_speed']):
+        multiplier *= 1 + 0.01 * min(max(row['wind_speed'], 0), 20)  # up to +20%
+    if 'temperature' in row and not pd.isna(row['temperature']):
+        if row['temperature'] >= 80:
+            multiplier *= 1.10  # hot = more HRs
+        elif row['temperature'] >= 65:
+            multiplier *= 1.05
+        elif row['temperature'] <= 50:
+            multiplier *= 0.95  # cold = fewer HRs
+    if 'humidity' in row and not pd.isna(row['humidity']):
+        if row['humidity'] >= 70:
+            multiplier *= 1.05
+        elif row['humidity'] <= 30:
+            multiplier *= 0.97
+    return round(multiplier, 3)
+
+def weather_rating(multiplier):
+    if multiplier < 0.98:
+        return "Poor"
+    elif multiplier < 1.03:
+        return "Average"
+    elif multiplier < 1.09:
+        return "Good"
+    else:
+        return "Excellent"
+
 # ==== UI ====
 st.sidebar.header("⚡️ AI Mode")
 use_world_class = st.sidebar.checkbox("World Class Explainer (Optuna/Stacking/SHAP)", value=False)
@@ -260,36 +290,6 @@ if event_file is not None and today_file is not None:
         today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
         today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
 
-        # ==== TOP 10 LEADERBOARD AND MULTIPLIER PLOT ====
-        desired_cols = ["player_name", "team", "game_time", "opposing_pitcher", "hr_probability", "meta_hr_rank_score"]
-        cols = [c for c in desired_cols if c in today_df.columns]
-        leaderboard = today_df[cols].copy()
-        leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-        leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
-        top_n = 10
-        leaderboard_top = leaderboard.head(top_n)
-        st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI Top 10 Booster)**")
-        st.dataframe(leaderboard_top, use_container_width=True)
-        st.download_button(
-            f"⬇️ Download Top {top_n} Leaderboard CSV",
-            data=leaderboard_top.to_csv(index=False),
-            file_name=f"top{top_n}_leaderboard.csv"
-        )
-
-        st.subheader("💸 Outlay Multiplier Strength (Top 10)")
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.barh(
-            leaderboard_top["player_name"].astype(str),
-            leaderboard_top["meta_hr_rank_score"],
-            color="mediumseagreen"
-        )
-        ax.set_xlabel("Meta HR Rank Score (Multiplier Strength)")
-        ax.set_ylabel("Player")
-        ax.invert_yaxis()
-        for i, v in enumerate(leaderboard_top["meta_hr_rank_score"]):
-            ax.text(v, i, f"{v:.2f}", va='center')
-        st.pyplot(fig)
-
     else:
         # ==== WORLD CLASS: OPTUNA + STACKING + SHAP EXPLAINER ====
         st.markdown("## 🚀 **World Class Stacking AI (Optuna, SHAP, Platt/Isotonic Calib, Advanced Meta)**")
@@ -310,7 +310,7 @@ if event_file is not None and today_file is not None:
             clf.fit(X_train_scaled, y_train)
             return roc_auc_score(y_val, clf.predict_proba(X_val_scaled)[:, 1])
         study = optuna.create_study(direction='maximize')
-        study.optimize(opt_objective, n_trials=20)
+        study.optimize(opt_objective, n_trials=3)
         xgb_clf = xgb.XGBClassifier(**study.best_params, eval_metric='logloss', use_label_encoder=False)
         lgb_clf = lgb.LGBMClassifier(n_estimators=100)
         cat_clf = cb.CatBoostClassifier(iterations=100, verbose=0)
@@ -337,37 +337,36 @@ if event_file is not None and today_file is not None:
         today_df['meta_hr_rank_score'] = meta_boost.predict(meta_feats)
         today_df = today_df.sort_values('meta_hr_rank_score', ascending=False).reset_index(drop=True)
 
-        # ==== TOP 10 LEADERBOARD AND MULTIPLIER PLOT ====
-        desired_cols = ["player_name", "team", "game_time", "opposing_pitcher", "hr_probability", "meta_hr_rank_score"]
-        cols = [c for c in desired_cols if c in today_df.columns]
-        leaderboard = today_df[cols].copy()
-        leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-        leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
-        top_n = 10
-        leaderboard_top = leaderboard.head(top_n)
-        st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (World Class Booster)**")
-        st.dataframe(leaderboard_top, use_container_width=True)
-        st.download_button(
-            f"⬇️ Download Top {top_n} Leaderboard CSV",
-            data=leaderboard_top.to_csv(index=False),
-            file_name=f"top{top_n}_worldclass_leaderboard.csv"
-        )
+    # ==== Weather multiplier and rating applied after post-prediction, in both modes ====
+    weather_cols = ['wind_speed', 'temperature', 'humidity']
+    for col in weather_cols:
+        if col not in today_df.columns:
+            today_df[col] = np.nan
+    today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
+    today_df['weather_rating'] = today_df['weather_multiplier'].apply(weather_rating)
 
-        st.subheader("💸 Outlay Multiplier Strength (Top 10)")
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.barh(
-            leaderboard_top["player_name"].astype(str),
-            leaderboard_top["meta_hr_rank_score"],
-            color="mediumseagreen"
-        )
-        ax.set_xlabel("Meta HR Rank Score (Multiplier Strength)")
-        ax.set_ylabel("Player")
-        ax.invert_yaxis()
-        for i, v in enumerate(leaderboard_top["meta_hr_rank_score"]):
-            ax.text(v, i, f"{v:.2f}", va='center')
-        st.pyplot(fig)
+    # ==== TOP 30 LEADERBOARD (robust columns) ====
+    desired_cols = [
+        "player_name", "team", "game_time", "opposing_pitcher",
+        "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating"
+    ]
+    cols = [c for c in desired_cols if c in today_df.columns]
+    leaderboard = today_df[cols].copy()
+    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+    leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
+    leaderboard["weather_multiplier"] = leaderboard["weather_multiplier"].round(3)
+    top_n = 30
+    leaderboard_top = leaderboard.head(top_n)
+    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI Booster)**")
+    st.dataframe(leaderboard_top, use_container_width=True)
+    st.download_button(
+        f"⬇️ Download Top {top_n} Leaderboard CSV",
+        data=leaderboard_top.to_csv(index=False),
+        file_name=f"top{top_n}_leaderboard.csv"
+    )
 
-        # ==== SHAP Feature Impact Plot ====
+    # ==== (World Class only) SHAP + HR Probability Distribution Plots ====
+    if use_world_class:
         st.subheader("📈 SHAP Feature Impact (XGB)")
         try:
             explainer = shap.TreeExplainer(xgb_clf.fit(X_train_scaled, y_train))
@@ -377,8 +376,7 @@ if event_file is not None and today_file is not None:
         except Exception as e:
             st.warning(f"SHAP summary plot error: {e}")
 
-        # ==== HR Probability Distribution Plot ====
-        st.subheader("📊 HR Probability Distribution (Top 10)")
+        st.subheader("📊 HR Probability Distribution (Top 30)")
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
         ax.invert_yaxis()
