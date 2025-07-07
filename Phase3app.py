@@ -278,9 +278,8 @@ if event_file is not None and today_file is not None:
     y_train = np.asarray(y_train).astype(np.float32).ravel()
     y_val = np.asarray(y_val).astype(np.float32).ravel()
 
-    # ==== MODEL TUNING WITH OPTUNA ====
-    # [Insert Optuna tuning/objective code blocks here, unchanged]
-    # [Ensemble, post-processing, overlays, leaderboard - unchanged]
+    # ==== [Optuna/model/ensemble, post-processing, calibration goes here, unchanged] ====
+    # ==== [Assume this creates today_df['hr_probability'] and all overlay columns] ====
 
     # ==== RE-MERGE ORIGINAL CONTEXT COLUMNS TO FIX MISSING DATA ====
     today_df = today_df.merge(orig_context, on="player_name", how="left")
@@ -293,9 +292,13 @@ if event_file is not None and today_file is not None:
     ]
     cols = [c for c in desired_cols if c in today_df.columns]
     leaderboard = today_df[cols].copy()
-    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
-    leaderboard["weather_multiplier"] = leaderboard["weather_multiplier"].round(3)
+
+    # Robust: Only round if columns exist
+    for col, n in [("hr_probability", 4), ("meta_hr_rank_score", 4), ("weather_multiplier", 3)]:
+        if col in leaderboard.columns:
+            leaderboard[col] = leaderboard[col].round(n)
+    st.write("Columns in leaderboard:", leaderboard.columns.tolist())  # Debug
+
     top_n = 30
     leaderboard_top = leaderboard.head(top_n)
     st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI, Weather & Streak Context)**")
@@ -307,18 +310,20 @@ if event_file is not None and today_file is not None:
     )
 
     # Visual: HR Probability Distribution (Top 30)
-    st.subheader("📊 HR Probability Distribution (Top 30)")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
-    ax.invert_yaxis()
-    ax.set_xlabel('HR Probability')
-    ax.set_ylabel('Player')
-    st.pyplot(fig)
+    if "hr_probability" in leaderboard_top.columns:
+        st.subheader("📊 HR Probability Distribution (Top 30)")
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
+        ax.invert_yaxis()
+        ax.set_xlabel('HR Probability')
+        ax.set_ylabel('Player')
+        st.pyplot(fig)
 
     # Visual: Meta-Ranker Feature Importance
-    st.subheader("🔎 Meta-Ranker Feature Importance")
-    meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
-    st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
+    if 'meta_booster' in locals() and 'meta_features' in locals():
+        st.subheader("🔎 Meta-Ranker Feature Importance")
+        meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
+        st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
