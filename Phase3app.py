@@ -360,7 +360,7 @@ if event_file is not None and today_file is not None:
     # ==== FINAL TOP 30 LEADERBOARD ====
     desired_cols = [
         "player_name", "pitcher_team_code", "park",
-        "hr_probability, "meta_hr_rank_score", "weather_multiplier", "weather_rating",
+        "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
         "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating",
         "park_rating", "wind_dir_rating", "weather_labels"
     ]
