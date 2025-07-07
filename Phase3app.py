@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, StackingClassifier, GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
@@ -10,7 +10,6 @@ import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
-from sklearn.calibration import CalibratedClassifierCV
 import optuna
 import matplotlib.pyplot as plt
 
@@ -283,8 +282,7 @@ if event_file is not None and today_file is not None:
         clf.fit(
             X_train_scaled, y_train,
             eval_set=[(X_val_scaled, y_val)],
-            early_stopping_rounds=12,
-            verbose=False
+            early_stopping_rounds=12
         )
         preds = clf.predict_proba(X_val_scaled)[:, 1]
         return roc_auc_score(y_val, preds)
@@ -362,16 +360,18 @@ if event_file is not None and today_file is not None:
     # ==== FINAL TOP 30 LEADERBOARD ====
     desired_cols = [
         "player_name", "pitcher_team_code", "park",
-        "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
+        "hr_probability, "meta_hr_rank_score", "weather_multiplier", "weather_rating",
         "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating",
         "park_rating", "wind_dir_rating", "weather_labels"
     ]
     cols = [c for c in desired_cols if c in today_df.columns]
     leaderboard = today_df[cols].copy()
 
+    # Round key columns for clean display
     for col, n in [("hr_probability", 4), ("meta_hr_rank_score", 4), ("weather_multiplier", 3)]:
         if col in leaderboard.columns:
             leaderboard[col] = leaderboard[col].round(n)
+
     st.write("Columns in leaderboard:", leaderboard.columns.tolist())  # For debug
 
     top_n = 30
