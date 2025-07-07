@@ -128,12 +128,7 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X_today, "X_today features")
 
     # ==== FEATURE SELECTION SLIDER ====
-    max_feats = min(200, len(X.columns))
-    N_KEEP = st.slider(
-        "🔧 Select number of top features (by importance, after dropping low-variance columns)",
-        min_value=8, max_value=max_feats, value=min(60, max_feats), step=1,
-        help="Reduce this if your RAM or speed is a problem. More = more data, slower training."
-    )
+    N_KEEP = 200  # <---- Set this to whatever number you want (8-200 or less if you have fewer cols)
     st.info(f"Pruning to top {N_KEEP} features by mean importance (tree models)...")
     try:
         rf_tmp = RandomForestClassifier(n_estimators=25, max_depth=4, n_jobs=1, random_state=42)
