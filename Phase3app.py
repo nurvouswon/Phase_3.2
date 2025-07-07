@@ -124,6 +124,32 @@ if event_file is not None and today_file is not None:
     X = downcast_df(X)
     X_today = downcast_df(X_today)
 
+    # --- Drop low variance features (robust, fast) ---
+    def drop_low_variance(X, threshold=0.98):
+        to_drop = []
+        for c in X.columns:
+            if X[c].nunique() <= 1 or (X[c].value_counts(normalize=True).iloc[0] > threshold):
+                to_drop.append(c)
+        return X.drop(columns=to_drop, errors='ignore')
+
+    X = drop_low_variance(X)
+    X_today = X_today[X.columns]
+
+    # --- Automated feature selection (top N by RandomForest importance) ---
+    N_KEEP = 60  # Change this as desired; slider if you want
+    st.info(f"Pruning to top {N_KEEP} features by mean importance (tree models)...")
+    try:
+        rf_tmp = RandomForestClassifier(n_estimators=25, max_depth=4, n_jobs=1, random_state=42)
+        rf_tmp.fit(X, y)
+        importances = rf_tmp.feature_importances_
+        feat_imp_df = pd.DataFrame({"feature": X.columns, "importance": importances}).sort_values("importance", ascending=False)
+        top_feats = feat_imp_df["feature"].head(N_KEEP).tolist()
+        X = X[top_feats]
+        X_today = X_today[top_feats]
+        st.success(f"Feature columns reduced to {len(top_feats)} most important predictors.")
+    except Exception as e:
+        st.warning(f"Feature selection step failed: {e}")
+
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
