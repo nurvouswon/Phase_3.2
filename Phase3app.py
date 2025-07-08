@@ -255,6 +255,12 @@ if event_file is not None and today_file is not None:
     # ===== PHASE 1: Feature Crosses & Outlier Removal =====
     X = auto_feature_crosses(X, max_cross=24)
     X_today = auto_feature_crosses(X_today, max_cross=24)
+    # === ENSURE X_today MATCHES X (column order, missing columns) ===
+    cols_final = X.columns.tolist()
+    for c in cols_final:
+        if c not in X_today.columns:
+            X_today[c] = -1  # Safe fill for any missing features
+    X_today = X_today[cols_final]
     nan_inf_check(X, "X after crosses")
     nan_inf_check(X_today, "X_today after crosses")
     # Outlier removal (train only)
