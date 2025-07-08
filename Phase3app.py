@@ -1,21 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
-from sklearn.inspection import permutation_importance
-from sklearn.feature_selection import VarianceThreshold
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
-import matplotlib.pyplot as plt
 
-st.set_page_config("🏆 MLB HR Predictor — AI World Class", layout="wide")
-st.title("🏆 MLB Home Run Predictor — AI-Planet Crash-Proof Edition")
+st.set_page_config("🏆 MLB Home Run Predictor — Crash-Proof Debug Edition", layout="wide")
+st.title("🏆 MLB Home Run Predictor — Crash-Proof, Debug-First Edition")
 
 def safe_read(path):
     fn = str(getattr(path, 'name', path)).lower()
@@ -78,44 +75,24 @@ def nan_inf_check(X, name):
     if isinstance(X, pd.DataFrame):
         X_num = X.select_dtypes(include=[np.number])
         nans = X_num.isna().sum().sum()
-        # Force conversion to float64 for isinf
-        infs = np.isinf(X_num.astype(np.float64).values).sum()
+        infs = np.isinf(X_num.to_numpy(dtype=np.float64, copy=False)).sum()
     else:
-        arr = np.asarray(X, dtype=np.float64)
-        nans = np.isnan(arr).sum()
-        infs = np.isinf(arr).sum()
+        nans = np.isnan(X).sum()
+        infs = np.isinf(X).sum()
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
-# --- Feature Filter: Variance, Correlation, Cap ---
-def filter_features(X, X_today, max_feats=200, corr_threshold=0.95):
-    # Variance threshold
-    selector = VarianceThreshold(threshold=0.0001)
-    selector.fit(X)
-    low_var_cols = X.columns[~selector.get_support()]
-    if len(low_var_cols) > 0:
-        st.info(f"Removed {len(low_var_cols)} low-variance features.")
-        X = X.loc[:, selector.get_support()]
-        X_today = X_today.loc[:, selector.get_support()]
+def feature_debug(X):
+    st.write("🛡️ **Feature Debugging:**")
+    st.write("Data types:", X.dtypes.value_counts())
+    st.write("Columns with object dtype:", X.select_dtypes('O').columns.tolist())
+    for col in X.columns:
+        if X[col].dtype not in [np.float64, np.float32, np.int64, np.int32]:
+            st.write(f"Column {col} is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
+    st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
-    # Correlation filter
-    corr_matrix = X.corr().abs()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    drop_corr = [column for column in upper.columns if any(upper[column] > corr_threshold)]
-    if len(drop_corr) > 0:
-        st.info(f"Removed {len(drop_corr)} highly correlated features.")
-        X = X.drop(columns=drop_corr)
-        X_today = X_today.drop(columns=drop_corr)
-
-    # Cap features for ML selection
-    if X.shape[1] > max_feats:
-        st.info(f"Capped feature count to top {max_feats} (first {max_feats} features)")
-        keep_cols = X.columns[:max_feats]
-        X = X[keep_cols]
-        X_today = X_today[keep_cols]
-    return X, X_today
-
+# ---- APP START ----
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
@@ -137,160 +114,87 @@ if event_file is not None and today_file is not None:
             st.stop()
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
+        st.write(f"event_df shape: {event_df.shape}, today_df shape: {today_df.shape}")
+        st.write(f"event_df memory usage (MB): {event_df.memory_usage(deep=True).sum() / 1024**2:.2f}")
+        st.write(f"today_df memory usage (MB): {today_df.memory_usage(deep=True).sum() / 1024**2:.2f}")
 
     target_col = 'hr_outcome'
     if target_col not in event_df.columns:
         st.error("ERROR: No valid hr_outcome column found in event-level file.")
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
-    st.write("Feature count before filtering:", len(event_df.columns))
 
-    feat_cols_train = set(get_valid_feature_cols(event_df))
-    feat_cols_today = set(get_valid_feature_cols(today_df))
-    feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-    st.write(f"Initial number of numeric features in play: {len(feature_cols)}")
+    feature_cols = sorted(list(set(get_valid_feature_cols(event_df)) & set(get_valid_feature_cols(today_df))))
+    st.write(f"Feature count before filtering: {len(feature_cols)}")
 
+    # ---- DEBUG all features before selection
     X = clean_X(event_df[feature_cols])
-    y = event_df[target_col].astype(int)
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
-    X = downcast_df(X)
-    X_today = downcast_df(X_today)
+    feature_debug(X)
 
-    # ---- Crash-Proof Feature Filtering ----
-    X, X_today = filter_features(X, X_today, max_feats=200, corr_threshold=0.95)
+    # ---- Automated Feature Filtering (variance or top-N) ----
+    st.write("Select max features to use (reduce if crash):")
+    max_feats = st.number_input("Max features", min_value=10, max_value=len(X.columns), value=200, step=10)
+    variances = X.var().sort_values(ascending=False)
+    X = X[variances.head(max_feats).index]
+    X_today = X_today[X.columns]
     st.success(f"Final number of features after filtering: {X.shape[1]}")
 
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    # --- XGBoost Feature Importance Selection ---
-    st.write("⚡ Running XGBoost for feature importances...")
-    xgb_fs = xgb.XGBClassifier(n_estimators=50, max_depth=6, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0, tree_method='hist')
-    xgb_fs.fit(X, y)
-    feature_importances = pd.Series(xgb_fs.feature_importances_, index=X.columns)
-    top_features = feature_importances.sort_values(ascending=False).head(40).index.tolist()
-    st.write(f"Top 40 features by XGB importance: {top_features}")
-
-    # --- Permutation Importances ---
-    st.write("⚡ Calculating permutation importances (validation set)...")
-    X_train, X_val, y_train, y_val = train_test_split(X[top_features], y, test_size=0.2, random_state=42, stratify=y)
+    # =========== Split & Scale ===========
+    y = event_df[target_col].astype(int)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today[top_features])
-    xgb_fs.fit(X_train_scaled, y_train)
-    perm_imp = permutation_importance(xgb_fs, X_val_scaled, y_val, n_repeats=7, random_state=42)
-    pi_scores = pd.Series(perm_imp.importances_mean, index=top_features)
-    pi_features = pi_scores.sort_values(ascending=False).head(30).index.tolist()
-    st.write(f"Top 30 features by permutation importance: {pi_features}")
+    X_today_scaled = scaler.transform(X_today)
 
-    # === Final features: intersection of XGB and Permutation top features ===
-    final_features = [f for f in pi_features if f in top_features]
-    st.write(f"Features used in final model: {final_features}")
+    # =========== ML Training ===========
+    st.write("Training full ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
+    xgb_clf = xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=1)
+    lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
+    cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
+    rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
+    gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
+    lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+    models_for_ensemble = [
+        ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
+    ]
+    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+    for name, model in models_for_ensemble:
+        try:
+            model.fit(X_train_scaled, y_train)
+        except Exception as e:
+            st.warning(f"{name} training failed: {e}")
+    ensemble.fit(X_train_scaled, y_train)
 
-    X_train_final = X_train[final_features]
-    X_val_final = X_val[final_features]
-    X_today_final = X_today[final_features]
-
-    # --- Meta-Feature Interactions (top 10 only) ---
-    st.write("⚡ Creating meta-feature interactions for top features...")
-    from itertools import combinations
-    interaction_features = []
-    top10 = final_features[:10]
-    for f1, f2 in combinations(top10, 2):
-        X_train_final[f'{f1}_x_{f2}'] = X_train_final[f1] * X_train_final[f2]
-        X_val_final[f'{f1}_x_{f2}'] = X_val_final[f1] * X_val_final[f2]
-        X_today_final[f'{f1}_x_{f2}'] = X_today_final[f1] * X_today_final[f2]
-        interaction_features.append(f'{f1}_x_{f2}')
-    st.write(f"Added {len(interaction_features)} meta interaction features.")
-
-    # --- Stacked Ensemble (Crash Proof) ---
-    st.write("🧠 Training stacked ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
-    def make_base_learners():
-        return [
-            ('xgb', xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0, tree_method='hist')),
-            ('lgb', lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)),
-            ('cat', cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)),
-            ('rf', RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)),
-            ('gb', GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)),
-            ('lr', LogisticRegression(max_iter=900, solver='lbfgs', n_jobs=1))
-        ]
-    base_models = make_base_learners()
-    meta_train = np.zeros((X_train_final.shape[0], len(base_models)))
-    meta_val = np.zeros((X_val_final.shape[0], len(base_models)))
-    for i, (name, model) in enumerate(base_models):
-        model.fit(X_train_final, y_train)
-        meta_train[:, i] = model.predict_proba(X_train_final)[:,1]
-        meta_val[:, i] = model.predict_proba(X_val_final)[:,1]
-    meta_learner = LogisticRegression(max_iter=600)
-    meta_learner.fit(meta_train, y_train)
-    val_meta_pred = meta_learner.predict_proba(meta_val)[:,1]
-    auc = roc_auc_score(y_val, val_meta_pred)
-    ll = log_loss(y_val, val_meta_pred)
-    st.info(f"Stacked Ensemble Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
-
-    # --- Calibration ---
-    st.write("Calibrating meta-ensemble (isotonic regression)...")
+    # =========== Probability Calibration ===========
+    st.write("Calibrating probabilities with isotonic regression...")
+    y_val_pred = ensemble.predict_proba(X_val_scaled)[:, 1]
     ir = IsotonicRegression(out_of_bounds="clip")
-    val_meta_pred_cal = ir.fit_transform(val_meta_pred, y_val)
-
-    # --- Predict for today ---
-    meta_today = np.zeros((X_today_final.shape[0], len(base_models)))
-    for i, (name, model) in enumerate(base_models):
-        meta_today[:, i] = model.predict_proba(X_today_final)[:,1]
-    y_today_pred = meta_learner.predict_proba(meta_today)[:, 1]
+    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
+    y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
-    today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
-    today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
-    today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
-    today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
-    meta_pseudo_y = today_df['hr_probability'].copy()
-    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.15
-    meta_features = ['hr_probability', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
-    X_meta = today_df[meta_features].values
-    y_meta = meta_pseudo_y.values
-    from sklearn.ensemble import GradientBoostingRegressor
-    meta_booster = GradientBoostingRegressor(n_estimators=80, max_depth=3, learning_rate=0.1)
-    meta_booster.fit(X_meta, y_meta)
-    today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
-    today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
-
-    leaderboard_cols = []
+    # =========== Leaderboard ===========
     if "player_name" in today_df.columns:
-        leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "meta_hr_rank_score"]
-
-    leaderboard = today_df[leaderboard_cols]
-    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
-    top_n = 30
-    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (Crash-Proof, AI-Planet)**")
-    leaderboard_top = leaderboard.head(top_n)
-    st.dataframe(leaderboard_top, use_container_width=True)
-    st.download_button(
-        f"⬇️ Download Top {top_n} Leaderboard CSV",
-        data=leaderboard_top.to_csv(index=False),
-        file_name=f"top{top_n}_leaderboard.csv"
-    )
-
-    # HR Probability Distribution
-    if "hr_probability" in leaderboard_top.columns:
-        st.subheader("📊 HR Probability Distribution (Top 30)")
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
-        ax.invert_yaxis()
-        ax.set_xlabel('HR Probability')
-        ax.set_ylabel('Player')
-        st.pyplot(fig)
-
-    # Meta-Ranker Feature Importance
-    if 'meta_booster' in locals() and 'meta_features' in locals():
-        st.subheader("🔎 Meta-Ranker Feature Importance")
-        meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
-        st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
+        leaderboard = today_df[["player_name", "hr_probability"]].copy()
+        leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+        leaderboard = leaderboard.sort_values("hr_probability", ascending=False).reset_index(drop=True)
+        st.markdown(f"### 🏆 **Top 30 HR Leaderboard**")
+        st.dataframe(leaderboard.head(30), use_container_width=True)
+        st.download_button(
+            f"⬇️ Download Top 30 Leaderboard CSV",
+            data=leaderboard.head(30).to_csv(index=False),
+            file_name=f"top30_leaderboard.csv"
+        )
+    else:
+        st.dataframe(today_df.sort_values("hr_probability", ascending=False).head(30), use_container_width=True)
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
