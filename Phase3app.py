@@ -2,20 +2,20 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
-import matplotlib.pyplot as plt
 from sklearn.isotonic import IsotonicRegression
+from sklearn.feature_selection import SelectFromModel
+import gc
 
-st.set_page_config("2️⃣ MLB HR Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]", layout="wide")
-st.title("2️⃣ MLB Home Run Predictor — Deep Ensemble + Weather Score [DEEP RESEARCH + GAME DAY OVERLAYS]")
+st.set_page_config("🏆 MLB HR Predictor — AI World Class", layout="wide")
+st.title("🏆 MLB Home Run Predictor — AI-Powered Best in the World")
 
-# ==== FILE HELPERS ====
 def safe_read(path):
     fn = str(getattr(path, 'name', path)).lower()
     if fn.endswith('.parquet'):
@@ -64,18 +64,6 @@ def get_valid_feature_cols(df, drop=None):
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
 
-def drop_high_na_low_var(df, thresh_na=1.0, thresh_var=0.0):
-    cols_to_drop = []
-    na_frac = df.isnull().mean()
-    low_var_cols = df.select_dtypes(include=[np.number]).columns[df.select_dtypes(include=[np.number]).std() < thresh_var]
-    for c in df.columns:
-        if na_frac.get(c, 0) > thresh_na:
-            cols_to_drop.append(c)
-        elif c in low_var_cols:
-            cols_to_drop.append(c)
-    df2 = df.drop(columns=cols_to_drop, errors="ignore")
-    return df2, cols_to_drop
-
 def downcast_df(df):
     float_cols = df.select_dtypes(include=['float'])
     int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
@@ -85,52 +73,130 @@ def downcast_df(df):
         df[col] = pd.to_numeric(df[col], downcast='integer')
     return df
 
-def nan_inf_check(df, name):
-    numeric_df = df.select_dtypes(include=[np.number]).apply(pd.to_numeric, errors='coerce')
-    arr = numeric_df.to_numpy(dtype=np.float64, copy=False)  # Ensures np.isinf works
+def nan_inf_check(X, name):
+    arr = np.asarray(X)
     nans = np.isnan(arr).sum()
     infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
-# ==== GAME DAY OVERLAY MULTIPLIERS ====
-def overlay_multiplier(row):
+def compute_weather_multiplier(row):
     multiplier = 1.0
-    wind_col = 'wind_mph'
-    wind_dir_col = 'wind_dir_string'
-    if wind_col in row and wind_dir_col in row:
-        wind = row[wind_col]
-        wind_dir = str(row[wind_dir_col]).lower()
-        if pd.notnull(wind) and wind >= 10:
-            if 'out' in wind_dir:
-                multiplier *= 1.08
-            elif 'in' in wind_dir:
-                multiplier *= 0.93
-    temp_col = 'temp'
-    if temp_col in row and pd.notnull(row[temp_col]):
-        base_temp = 70
-        delta = row[temp_col] - base_temp
-        multiplier *= 1.03 ** (delta / 10)
-    humidity_col = 'humidity'
-    if humidity_col in row and pd.notnull(row[humidity_col]):
-        hum = row[humidity_col]
-        if hum > 60:
-            multiplier *= 1.02
-        elif hum < 40:
-            multiplier *= 0.98
-    park_hr_col = 'park_hr_rate'
-    if park_hr_col in row and pd.notnull(row[park_hr_col]):
-        pf = max(0.85, min(1.20, float(row[park_hr_col])))
-        multiplier *= pf
-    return multiplier
+    if 'wind_mph' in row and not pd.isna(row['wind_mph']):
+        multiplier *= 1 + 0.01 * min(max(row['wind_mph'], 0), 20)
+    if 'temp' in row and not pd.isna(row['temp']):
+        if row['temp'] >= 80:
+            multiplier *= 1.10
+        elif row['temp'] >= 65:
+            multiplier *= 1.05
+        elif row['temp'] <= 50:
+            multiplier *= 0.95
+    if 'humidity' in row and not pd.isna(row['humidity']):
+        if row['humidity'] >= 70:
+            multiplier *= 1.05
+        elif row['humidity'] <= 30:
+            multiplier *= 0.97
+    return round(multiplier, 3)
 
-# ==== UI ====
+def weather_rating(multiplier):
+    if multiplier < 0.98:
+        return "Poor"
+    elif multiplier < 1.03:
+        return "Average"
+    elif multiplier < 1.09:
+        return "Good"
+    else:
+        return "Excellent"
+
+def add_streak_features(event_df, today_df):
+    event_df = event_df.sort_values(['player_name', 'game_date'])
+    event_df['hr_5g'] = (
+        event_df.groupby('player_name')['hr_outcome']
+        .transform(lambda x: x.rolling(window=5, min_periods=1).sum().shift(1))
+    )
+    event_df['hr_10g'] = (
+        event_df.groupby('player_name')['hr_outcome']
+        .transform(lambda x: x.rolling(window=10, min_periods=1).sum().shift(1))
+    )
+    def cold_streak(x):
+        streak = 0
+        for val in reversed(x):
+            if val == 0:
+                streak += 1
+            else:
+                break
+        return streak
+    event_df['cold_streak'] = (
+        event_df.groupby('player_name')['hr_outcome']
+        .transform(lambda x: cold_streak(x.values))
+    )
+    streak_cols = ['player_name', 'game_date', 'hr_5g', 'hr_10g', 'cold_streak']
+    streak_df = event_df.sort_values(['player_name', 'game_date']).groupby('player_name').tail(1)[streak_cols]
+    today_df = today_df.merge(streak_df, on='player_name', how='left')
+    return today_df
+
+def assign_streak_label(row):
+    if pd.notnull(row.get('hr_5g', None)) and row['hr_5g'] >= 3:
+        return "HOT"
+    if pd.notnull(row.get('cold_streak', None)) and row['cold_streak'] >= 7:
+        return "COLD"
+    if pd.notnull(row.get('hr_10g', None)) and 2 <= row['hr_10g'] < 3:
+        return "Breakout Watch"
+    return ""
+
+def rate_wind_speed(ws):
+    if pd.isnull(ws): return ""
+    if ws >= 15: return "Extreme Wind"
+    if ws >= 10: return "Strong Wind"
+    if ws >= 5:  return "Mild Wind"
+    return "Calm"
+
+def rate_humidity(hum):
+    if pd.isnull(hum): return ""
+    if hum >= 70: return "Very Humid"
+    if hum >= 50: return "Humid"
+    if hum <= 30: return "Dry"
+    return "Moderate"
+
+def rate_temperature(temp):
+    if pd.isnull(temp): return ""
+    if temp >= 90: return "Very Hot"
+    if temp >= 75: return "Hot"
+    if temp <= 50: return "Cold"
+    return "Mild"
+
+def rate_park(park):
+    if pd.isnull(park): return ""
+    s = str(park).upper()
+    if "COORS" in s: return "HR Paradise"
+    if "PETCO" in s: return "Pitcher's Park"
+    if "DODGER" in s or "ORACLE" in s: return "Neutral Park"
+    return "Neutral Park"
+
+def rate_wind_dir(wd):
+    if pd.isnull(wd): return ""
+    wd_str = str(wd).lower()
+    if "out" in wd_str: return "HR Wind"
+    if "in" in wd_str:  return "HR Suppressing"
+    if "left" in wd_str or "right" in wd_str: return "Crosswind"
+    return "Neutral"
+
+def combine_weather_labels(row):
+    parts = [
+        row.get('wind_speed_rating', ""),
+        row.get('humidity_rating', ""),
+        row.get('temperature_rating', ""),
+        row.get('park_rating', ""),
+        row.get('wind_dir_rating', "")
+    ]
+    return ", ".join([p for p in parts if p])
+
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
 if event_file is not None and today_file is not None:
-    with st.spinner("Loading and prepping files (1-2 min, be patient)..."):
+    with st.spinner("Loading and prepping files..."):
         event_df = safe_read(event_file)
         today_df = safe_read(today_file)
         event_df = event_df.dropna(axis=1, how='all')
@@ -139,13 +205,11 @@ if event_file is not None and today_file is not None:
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
-        dupes_event = find_duplicate_columns(event_df)
-        if dupes_event:
-            st.error(f"Duplicate columns in event file after deduplication: {set(dupes_event)}")
+        if find_duplicate_columns(event_df):
+            st.error(f"Duplicate columns in event file")
             st.stop()
-        dupes_today = find_duplicate_columns(today_df)
-        if dupes_today:
-            st.error(f"Duplicate columns in today file after deduplication: {set(dupes_today)}")
+        if find_duplicate_columns(today_df):
+            st.error(f"Duplicate columns in today file")
             st.stop()
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
@@ -155,196 +219,158 @@ if event_file is not None and today_file is not None:
         st.error("ERROR: No valid hr_outcome column found in event-level file.")
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
+    st.dataframe(event_df[target_col].value_counts(dropna=False).reset_index(), use_container_width=True)
 
-    value_counts = event_df[target_col].value_counts(dropna=False).reset_index()
-    value_counts.columns = [target_col, 'count']
-    st.write("Value counts for hr_outcome:")
-    st.dataframe(value_counts)
-
-    # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
-    st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
-    clust_thresh = 1.0  # Fixed threshold, no slider
-
-    # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of initial features: {len(feature_cols)}")
 
-    X_full = event_df[feature_cols].fillna(0)
-    corr_matrix = X_full.corr().abs()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
-    feature_cols = [col for col in feature_cols if col not in to_drop]
-
-    # FINAL INTERSECTION with today's columns to ensure no KeyError
-    feature_cols = [col for col in feature_cols if col in today_df.columns]
-    st.write(f"Features retained after clustering & intersection: {len(feature_cols)}")
-    st.write(feature_cols)
-
-    X = clean_X(event_df[feature_cols])
-    y = event_df[target_col]
-    X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
-    X = downcast_df(X)
-    X_today = downcast_df(X_today)
+    # Always numeric and float32
+    X = clean_X(event_df[feature_cols]).select_dtypes(include=[np.number]).astype(np.float32)
+    y = event_df[target_col].astype(int)
+    X_today = clean_X(today_df[feature_cols], train_cols=X.columns).select_dtypes(include=[np.number]).astype(np.float32)
 
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    st.write("Splitting for validation and scaling...")
+    # Model-based Feature Selection: RF, XGB, or LGB — reduce to 200
+    st.write("Selecting top 200 features with model-based selection...")
+    selector_model = RandomForestClassifier(n_estimators=30, max_depth=5, n_jobs=1)
+    selector_model.fit(X, y)
+    sfm = SelectFromModel(selector_model, prefit=True, max_features=200, threshold=-np.inf)
+    X_reduced = sfm.transform(X)
+    X_today_reduced = sfm.transform(X_today)
+    reduced_features = np.array(X.columns)[sfm.get_support()]
+    st.write(f"Selected {len(reduced_features)} features for modeling.")
+
+    # Train/val split and scaling
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X_reduced, y, test_size=0.2, random_state=42, stratify=y
     )
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today)
+    X_today_scaled = scaler.transform(X_today_reduced)
 
-    # =========== DEEP RESEARCH ENSEMBLE (SOFT VOTING) ===========
-    st.write("Training base models (XGB, LGBM, CatBoost, RF, GB, LR)...")
-    xgb_clf = xgb.XGBClassifier(
-        n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss',
-        n_jobs=1, verbosity=1, tree_method='hist'
-    )
+    # Fit ensemble models
+    st.write("Training models (XGB, LGBM, CatBoost, RF, GB, LR)...")
+    xgb_clf = xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
     lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
     cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
     rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
     gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
     lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-
-    model_status = []
-    models_for_ensemble = []
-    importances = {}
-    try:
-        xgb_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('xgb', xgb_clf))
-        model_status.append('XGB OK')
-        importances['XGB'] = xgb_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"XGBoost failed: {e}")
-    try:
-        lgb_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('lgb', lgb_clf))
-        model_status.append('LGB OK')
-        importances['LGB'] = lgb_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"LightGBM failed: {e}")
-    try:
-        cat_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('cat', cat_clf))
-        model_status.append('CatBoost OK')
-        importances['CatBoost'] = cat_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"CatBoost failed: {e}")
-    try:
-        rf_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('rf', rf_clf))
-        model_status.append('RF OK')
-        importances['RF'] = rf_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"RandomForest failed: {e}")
-    try:
-        gb_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('gb', gb_clf))
-        model_status.append('GB OK')
-        importances['GB'] = gb_clf.feature_importances_
-    except Exception as e:
-        st.warning(f"GBM failed: {e}")
-    try:
-        lr_clf.fit(X_train_scaled, y_train)
-        models_for_ensemble.append(('lr', lr_clf))
-        model_status.append('LR OK')
-        importances['LR'] = np.abs(lr_clf.coef_[0])
-    except Exception as e:
-        st.warning(f"LogReg failed: {e}")
-
-    st.info("Model training status: " + ', '.join(model_status))
-    if not models_for_ensemble:
-        st.error("All models failed to train! Try reducing features or rows.")
-        st.stop()
-
-    st.write("Fitting ensemble (soft voting)...")
+    models_for_ensemble = [
+        ('xgb', xgb_clf),
+        ('lgb', lgb_clf),
+        ('cat', cat_clf),
+        ('rf', rf_clf),
+        ('gb', gb_clf),
+        ('lr', lr_clf),
+    ]
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+    for name, model in models_for_ensemble:
+        try:
+            model.fit(X_train_scaled, y_train)
+        except Exception as e:
+            st.warning(f"{name} training failed: {e}")
     ensemble.fit(X_train_scaled, y_train)
 
-    # =========== FEATURE IMPORTANCE DIAGNOSTICS ===========
-    st.markdown("## 🔍 Feature Importances (Mean of Tree Models)")
-    tree_keys = [k for k in importances.keys() if k in ("XGB", "LGB", "CatBoost", "RF", "GB")]
-    if tree_keys:
-        tree_importances = np.mean([importances[k] for k in tree_keys], axis=0)
-        import_df = pd.DataFrame({
-            "feature": X.columns,
-            "importance": tree_importances
-        }).sort_values("importance", ascending=False)
-        st.dataframe(import_df.head(30), use_container_width=True)
-        fig, ax = plt.subplots(figsize=(7,5))
-        ax.barh(import_df.head(20)["feature"][::-1], import_df.head(20)["importance"][::-1])
-        ax.set_title("Top 20 Feature Importances (Avg of Tree Models)")
-        st.pyplot(fig)
-    else:
-        st.warning("Tree model feature importances not available.")
-
-    # =========== VALIDATION ===========
-    st.write("Validating (out-of-fold, not test-leak)...")
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:,1]
-    auc = roc_auc_score(y_val, y_val_pred)
-    ll = log_loss(y_val, y_val_pred)
-    st.info(f"Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
-
-    # =========== CALIBRATION (Isotonic Regression) ===========
-    st.write("Calibrating prediction probabilities (isotonic regression, deep research)...")
+    # Calibrate
+    st.write("Calibrating probabilities with isotonic regression...")
+    y_val_pred = ensemble.predict_proba(X_val_scaled)[:, 1]
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-    # =========== PREDICT ===========
-    st.write("Predicting HR probability for today (calibrated)...")
     y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    # ==== APPLY OVERLAY SCORING ====
-    st.write("Applying post-prediction game day overlay scoring (weather, park, etc)...")
-    if 'hr_probability' in today_df.columns:
-        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
-    else:
-        today_df['final_hr_probability'] = today_df['hr_probability']
+    # Context/streak/weather
+    context_cols = ["player_name", "pitcher_team_code", "park"]
+    context_cols_present = [c for c in context_cols if c in today_df.columns]
+    orig_context = today_df[context_cols_present].copy() if context_cols_present else None
 
-    # ==== TOP N PRECISION LEADERBOARD WITH CONFIDENCE GAP ====
-    leaderboard_cols = []
-    if "player_name" in today_df.columns:
-        leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "overlay_multiplier", "final_hr_probability"]
+    today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
+    today_df['weather_rating'] = today_df['weather_multiplier'].apply(weather_rating)
+    today_df = add_streak_features(event_df, today_df)
+    today_df['streak_label'] = today_df.apply(assign_streak_label, axis=1)
+    today_df['wind_speed_rating'] = today_df['wind_mph'].apply(rate_wind_speed) if 'wind_mph' in today_df else ""
+    today_df['humidity_rating'] = today_df['humidity'].apply(rate_humidity) if 'humidity' in today_df else ""
+    today_df['temperature_rating'] = today_df['temp'].apply(rate_temperature) if 'temp' in today_df else ""
+    today_df['park_rating'] = today_df['park'].apply(rate_park) if 'park' in today_df else ""
+    today_df['wind_dir_rating'] = today_df['wind_dir_string'].apply(rate_wind_dir) if 'wind_dir_string' in today_df else ""
+    today_df['weather_labels'] = today_df.apply(combine_weather_labels, axis=1)
 
-    leaderboard = today_df[leaderboard_cols].sort_values("final_hr_probability", ascending=False).reset_index(drop=True)
-    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-    leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
+    today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
+    today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
+    today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
+    today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
+    meta_pseudo_y = today_df['hr_probability'].copy()
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.15
+    meta_features = ['hr_probability', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
+    X_meta = today_df[meta_features].values
+    y_meta = meta_pseudo_y.values
+    meta_booster = GradientBoostingRegressor(n_estimators=80, max_depth=3, learning_rate=0.1)
+    meta_booster.fit(X_meta, y_meta)
+    today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
+    today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
+    if orig_context is not None:
+        today_df = today_df.merge(orig_context, on="player_name", how="left")
 
-    # Change this value for Top 10 or Top 30 leaderboard
+    desired_cols = [
+        "player_name", "pitcher_team_code", "park",
+        "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
+        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating",
+        "park_rating", "wind_dir_rating", "weather_labels"
+    ]
+    cols = [c for c in desired_cols if c in today_df.columns]
+    leaderboard = today_df[cols].copy()
+
+    # Round for display
+    for col, n in [("hr_probability", 4), ("meta_hr_rank_score", 4), ("weather_multiplier", 3)]:
+        if col in leaderboard.columns:
+            leaderboard[col] = leaderboard[col].round(n)
+
+    st.write("Columns in leaderboard:", leaderboard.columns.tolist())  # For debug
+
     top_n = 30
-
-    st.markdown(f"### 🏆 **Top {top_n} Precision HR Leaderboard (Deep Calibrated)**")
     leaderboard_top = leaderboard.head(top_n)
+    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI, Weather & Streak Context)**")
     st.dataframe(leaderboard_top, use_container_width=True)
-
-    # Confidence gap: drop-off between last included and next
-    if len(leaderboard) > top_n:
-        gap = leaderboard.loc[top_n - 1, "final_hr_probability"] - leaderboard.loc[top_n, "final_hr_probability"]
-        st.markdown(f"**Confidence gap between #{top_n}/{top_n + 1}:** `{gap:.4f}`")
-    else:
-        st.markdown(f"**Confidence gap:** (less than {top_n+1} players in leaderboard)")
-
-    # Download full leaderboard and prediction CSVs
-    st.download_button(
-        f"⬇️ Download Full Prediction CSV",
-        data=today_df.to_csv(index=False),
-        file_name="today_hr_predictions.csv"
-    )
     st.download_button(
         f"⬇️ Download Top {top_n} Leaderboard CSV",
         data=leaderboard_top.to_csv(index=False),
         file_name=f"top{top_n}_leaderboard.csv"
     )
+
+    import matplotlib.pyplot as plt
+    if "hr_probability" in leaderboard_top.columns:
+        st.subheader("📊 HR Probability Distribution (Top 30)")
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
+        ax.invert_yaxis()
+        ax.set_xlabel('HR Probability')
+        ax.set_ylabel('Player')
+        st.pyplot(fig)
+
+    if 'meta_booster' in locals() and 'meta_features' in locals():
+        st.subheader("🔎 Meta-Ranker Feature Importance")
+        meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
+        st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
+
+    # Optional: Download the full prediction file with all features
+    st.download_button(
+        "⬇️ Download Full Prediction CSV",
+        data=today_df.to_csv(index=False),
+        file_name="today_hr_predictions.csv"
+    )
+
+    # Clean up memory after major processing
+    del X, X_today, X_train, X_val, X_train_scaled, X_val_scaled, X_today_scaled
+    del X_reduced, X_today_reduced, ensemble, models_for_ensemble
+    gc.collect()
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
