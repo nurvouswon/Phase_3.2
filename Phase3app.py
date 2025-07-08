@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
@@ -10,7 +10,6 @@ import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
-from sklearn.feature_selection import VarianceThreshold
 
 st.set_page_config("🏆 MLB HR Predictor — AI World Class", layout="wide")
 st.title("🏆 MLB Home Run Predictor — AI-Powered Best in the World")
@@ -27,9 +26,6 @@ def safe_read(path):
 def dedup_columns(df):
     return df.loc[:, ~df.columns.duplicated()]
 
-def find_duplicate_columns(df):
-    return [col for col in df.columns if list(df.columns).count(col) > 1]
-
 def fix_types(df):
     for col in df.columns:
         if df[col].isnull().all():
@@ -44,8 +40,6 @@ def fix_types(df):
     return df
 
 def clean_X(df, train_cols=None):
-    df = dedup_columns(df)
-    df = fix_types(df)
     allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status'}
     drop_cols = [c for c in df.select_dtypes('O').columns if c not in allowed_obj]
     df = df.drop(columns=drop_cols, errors='ignore')
@@ -80,6 +74,61 @@ def nan_inf_check(X, name):
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
+def compute_weather_multiplier(row):
+    multiplier = 1.0
+    if 'wind_mph' in row and not pd.isna(row['wind_mph']):
+        multiplier *= 1 + 0.01 * min(max(row['wind_mph'], 0), 20)
+    if 'temp' in row and not pd.isna(row['temp']):
+        if row['temp'] >= 80:
+            multiplier *= 1.10
+        elif row['temp'] >= 65:
+            multiplier *= 1.05
+        elif row['temp'] <= 50:
+            multiplier *= 0.95
+    if 'humidity' in row and not pd.isna(row['humidity']):
+        if row['humidity'] >= 70:
+            multiplier *= 1.05
+        elif row['humidity'] <= 30:
+            multiplier *= 0.97
+    return round(multiplier, 3)
+
+def add_streak_features(event_df, today_df):
+    event_df = event_df.sort_values(['player_name', 'game_date'])
+    event_df['hr_5g'] = (
+        event_df.groupby('player_name')['hr_outcome']
+        .transform(lambda x: x.rolling(window=5, min_periods=1).sum().shift(1))
+    )
+    event_df['hr_10g'] = (
+        event_df.groupby('player_name')['hr_outcome']
+        .transform(lambda x: x.rolling(window=10, min_periods=1).sum().shift(1))
+    )
+    def cold_streak(x):
+        streak = 0
+        for val in reversed(x):
+            if val == 0:
+                streak += 1
+            else:
+                break
+        return streak
+    event_df['cold_streak'] = (
+        event_df.groupby('player_name')['hr_outcome']
+        .transform(lambda x: cold_streak(x.values))
+    )
+    streak_cols = ['player_name', 'game_date', 'hr_5g', 'hr_10g', 'cold_streak']
+    streak_df = event_df.sort_values(['player_name', 'game_date']).groupby('player_name').tail(1)[streak_cols]
+    today_df = today_df.merge(streak_df, on='player_name', how='left')
+    return today_df
+
+def assign_streak_label(row):
+    if pd.notnull(row.get('hr_5g', None)) and row['hr_5g'] >= 3:
+        return "HOT"
+    if pd.notnull(row.get('cold_streak', None)) and row['cold_streak'] >= 7:
+        return "COLD"
+    if pd.notnull(row.get('hr_10g', None)) and 2 <= row['hr_10g'] < 3:
+        return "Breakout Watch"
+    return ""
+
+# ==== UI ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
@@ -93,12 +142,6 @@ if event_file is not None and today_file is not None:
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
-        if find_duplicate_columns(event_df):
-            st.error(f"Duplicate columns in event file")
-            st.stop()
-        if find_duplicate_columns(today_df):
-            st.error(f"Duplicate columns in today file")
-            st.stop()
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
 
@@ -107,50 +150,34 @@ if event_file is not None and today_file is not None:
         st.error("ERROR: No valid hr_outcome column found in event-level file.")
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
-    st.dataframe(event_df[target_col].value_counts(dropna=False).reset_index(), use_container_width=True)
 
-    # ==== SMART FEATURE SELECTION (w/ crash protection) ====
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
     st.write(f"Number of features in play: {len(feature_cols)}")
-    X = clean_X(event_df[feature_cols])
+
+    # === CRASHPROOF: Numeric-only, de-duplication, feature cap ===
+    X = event_df[feature_cols].copy()
+    X_today = today_df[feature_cols].copy()
+    X = X.loc[:, ~X.columns.duplicated()]
+    X_today = X_today.loc[:, ~X_today.columns.duplicated()]
+    # Only numerics!
+    num_cols = X.select_dtypes(include=[np.number]).columns
+    X = X[num_cols]
+    X_today = X_today[num_cols]
+    st.write(f"Numeric features after cleanup: {X.shape[1]}")
+    # Cap at 200 for speed/safety
+    MAX_FEATS = 200
+    if X.shape[1] > MAX_FEATS:
+        st.warning(f"Capping to {MAX_FEATS} features for stability.")
+        X = X.iloc[:, :MAX_FEATS]
+        X_today = X_today[X.columns]
+
     y = event_df[target_col].astype(int)
-    X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
-    X = downcast_df(X)
-    X_today = downcast_df(X_today)
+    X = X.fillna(-1)
+    X_today = X_today.fillna(-1)
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
-
-    # === Feature Preselection (Constant/Low Variance) ===
-    st.write("🔬 Preselecting features to avoid crash (remove constant/low variance)...")
-    orig_feat_count = X.shape[1]
-    vt = VarianceThreshold(threshold=0.0001)  # Remove constant/near-constant
-    vt.fit(X)
-    support_mask = vt.get_support()
-    preselected_cols = X.columns[support_mask]
-    X_pre = X[preselected_cols]
-    X_today_pre = X_today[preselected_cols]
-    st.write(f"Feature count after variance threshold: {X_pre.shape[1]} (from {orig_feat_count})")
-
-    if X_pre.shape[1] > 300:
-        st.warning("Too many features even after thresholding; using only first 300 for feature importance")
-        preselected_cols = preselected_cols[:300]
-        X_pre = X_pre.iloc[:, :300]
-        X_today_pre = X_today_pre.iloc[:, :300]
-
-    # === Feature selection: Top 120 by XGBoost ===
-    st.write("⚡ Selecting top features (XGBoost importances)...")
-    xgb_fs = xgb.XGBClassifier(n_estimators=60, max_depth=6, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
-    xgb_fs.fit(X_pre, y)
-    importances = pd.Series(xgb_fs.feature_importances_, index=X_pre.columns)
-    top_features = importances.sort_values(ascending=False).head(120).index.tolist()
-
-    # Use only selected features for all modeling
-    X = X_pre[top_features]
-    X_today = X_today_pre[top_features]
-    nan_inf_check(X, "X features (post-selection)")
-    nan_inf_check(X_today, "X_today features (post-selection)")
 
     st.write("Splitting for validation and scaling...")
     X_train, X_val, y_train, y_val = train_test_split(
@@ -161,28 +188,27 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # ==== Train all models ====
-    st.write("Training final ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
-    xgb_clf = xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
+    st.write("Training ensemble models (XGB, LGBM, CatBoost, RF, GB, LR)...")
+    xgb_clf = xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=1)
     lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
     cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
     rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
     gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
     lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-    models_for_ensemble = [
-        ('xgb', xgb_clf),
-        ('lgb', lgb_clf),
-        ('cat', cat_clf),
-        ('rf', rf_clf),
-        ('gb', gb_clf),
-        ('lr', lr_clf),
-    ]
-    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    for name, model in models_for_ensemble:
+
+    models_for_ensemble = []
+    for clf, name in zip([xgb_clf, lgb_clf, cat_clf, rf_clf, gb_clf, lr_clf], ['XGB','LGB','CatBoost','RF','GB','LR']):
         try:
-            model.fit(X_train_scaled, y_train)
+            clf.fit(X_train_scaled, y_train)
+            models_for_ensemble.append((name, clf))
         except Exception as e:
-            st.warning(f"{name} training failed: {e}")
+            st.warning(f"{name} failed: {e}")
+
+    if not models_for_ensemble:
+        st.error("No models could be trained. Try reducing features or data size.")
+        st.stop()
+
+    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
     ensemble.fit(X_train_scaled, y_train)
 
     st.write("Calibrating probabilities with isotonic regression...")
@@ -193,22 +219,29 @@ if event_file is not None and today_file is not None:
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    # === Final Leaderboard ===
+    # Add weather and streak features
+    today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
+    today_df = add_streak_features(event_df, today_df)
+    today_df['streak_label'] = today_df.apply(assign_streak_label, axis=1)
+
+    today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    leaderboard_cols = []
     if "player_name" in today_df.columns:
-        leaderboard = today_df[["player_name", "hr_probability"]].copy()
-    else:
-        leaderboard = today_df[["hr_probability"]].copy()
+        leaderboard_cols.append("player_name")
+    leaderboard_cols += ["hr_probability", "weather_multiplier", "streak_label"]
+
+    leaderboard = today_df[leaderboard_cols].copy()
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+    leaderboard["weather_multiplier"] = leaderboard["weather_multiplier"].round(3)
 
     top_n = 30
-    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI Calibrated)**")
-    leaderboard_top = leaderboard.sort_values("hr_probability", ascending=False).head(top_n).reset_index(drop=True)
+    leaderboard_top = leaderboard.head(top_n)
+    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard**")
     st.dataframe(leaderboard_top, use_container_width=True)
     st.download_button(
         f"⬇️ Download Top {top_n} Leaderboard CSV",
         data=leaderboard_top.to_csv(index=False),
         file_name=f"top{top_n}_leaderboard.csv"
     )
-
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
