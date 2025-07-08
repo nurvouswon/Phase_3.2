@@ -1,21 +1,24 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
+from sklearn.inspection import permutation_importance
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
-from sklearn.feature_selection import SelectFromModel
-import gc
+from sklearn.ensemble import GradientBoostingRegressor
 
-st.set_page_config("🏆 MLB HR Predictor — AI World Class", layout="wide")
-st.title("🏆 MLB Home Run Predictor — AI-Powered Best in the World")
+# ------- State-of-the-Art MLB HR Predictor App -------
 
+st.set_page_config("🏆 MLB HR Predictor — World Class AI", layout="wide")
+st.title("🏆 MLB Home Run Predictor — World Class AI Stack")
+
+# ==== File Reading & Utilities ====
 def safe_read(path):
     fn = str(getattr(path, 'name', path)).lower()
     if fn.endswith('.parquet'):
@@ -27,9 +30,6 @@ def safe_read(path):
 
 def dedup_columns(df):
     return df.loc[:, ~df.columns.duplicated()]
-
-def find_duplicate_columns(df):
-    return [col for col in df.columns if list(df.columns).count(col) > 1]
 
 def fix_types(df):
     for col in df.columns:
@@ -81,6 +81,7 @@ def nan_inf_check(X, name):
         st.error(f"Found {nans} NaNs and {infs} Infs in {name}! Please fix.")
         st.stop()
 
+# ==== Context/Weather/Streak Features ====
 def compute_weather_multiplier(row):
     multiplier = 1.0
     if 'wind_mph' in row and not pd.isna(row['wind_mph']):
@@ -98,16 +99,6 @@ def compute_weather_multiplier(row):
         elif row['humidity'] <= 30:
             multiplier *= 0.97
     return round(multiplier, 3)
-
-def weather_rating(multiplier):
-    if multiplier < 0.98:
-        return "Poor"
-    elif multiplier < 1.03:
-        return "Average"
-    elif multiplier < 1.09:
-        return "Good"
-    else:
-        return "Excellent"
 
 def add_streak_features(event_df, today_df):
     event_df = event_df.sort_values(['player_name', 'game_date'])
@@ -145,55 +136,11 @@ def assign_streak_label(row):
         return "Breakout Watch"
     return ""
 
-def rate_wind_speed(ws):
-    if pd.isnull(ws): return ""
-    if ws >= 15: return "Extreme Wind"
-    if ws >= 10: return "Strong Wind"
-    if ws >= 5:  return "Mild Wind"
-    return "Calm"
-
-def rate_humidity(hum):
-    if pd.isnull(hum): return ""
-    if hum >= 70: return "Very Humid"
-    if hum >= 50: return "Humid"
-    if hum <= 30: return "Dry"
-    return "Moderate"
-
-def rate_temperature(temp):
-    if pd.isnull(temp): return ""
-    if temp >= 90: return "Very Hot"
-    if temp >= 75: return "Hot"
-    if temp <= 50: return "Cold"
-    return "Mild"
-
-def rate_park(park):
-    if pd.isnull(park): return ""
-    s = str(park).upper()
-    if "COORS" in s: return "HR Paradise"
-    if "PETCO" in s: return "Pitcher's Park"
-    if "DODGER" in s or "ORACLE" in s: return "Neutral Park"
-    return "Neutral Park"
-
-def rate_wind_dir(wd):
-    if pd.isnull(wd): return ""
-    wd_str = str(wd).lower()
-    if "out" in wd_str: return "HR Wind"
-    if "in" in wd_str:  return "HR Suppressing"
-    if "left" in wd_str or "right" in wd_str: return "Crosswind"
-    return "Neutral"
-
-def combine_weather_labels(row):
-    parts = [
-        row.get('wind_speed_rating', ""),
-        row.get('humidity_rating', ""),
-        row.get('temperature_rating', ""),
-        row.get('park_rating', ""),
-        row.get('wind_dir_rating', "")
-    ]
-    return ", ".join([p for p in parts if p])
-
+# ==== Main App ====
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
+
+top_n = st.slider("Select Top N for Leaderboard", 5, 50, 10)
 
 if event_file is not None and today_file is not None:
     with st.spinner("Loading and prepping files..."):
@@ -205,12 +152,6 @@ if event_file is not None and today_file is not None:
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
-        if find_duplicate_columns(event_df):
-            st.error(f"Duplicate columns in event file")
-            st.stop()
-        if find_duplicate_columns(today_df):
-            st.error(f"Duplicate columns in today file")
-            st.stop()
         event_df = fix_types(event_df)
         today_df = fix_types(today_df)
 
@@ -219,90 +160,97 @@ if event_file is not None and today_file is not None:
         st.error("ERROR: No valid hr_outcome column found in event-level file.")
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
-    st.dataframe(event_df[target_col].value_counts(dropna=False).reset_index(), use_container_width=True)
 
-    feat_cols_train = set(get_valid_feature_cols(event_df))
-    feat_cols_today = set(get_valid_feature_cols(today_df))
-    feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-    st.write(f"Number of initial features: {len(feature_cols)}")
-
-    # Always numeric and float32
-    X = clean_X(event_df[feature_cols]).select_dtypes(include=[np.number]).astype(np.float32)
-    y = event_df[target_col].astype(int)
-    X_today = clean_X(today_df[feature_cols], train_cols=X.columns).select_dtypes(include=[np.number]).astype(np.float32)
-
-    nan_inf_check(X, "X features")
-    nan_inf_check(X_today, "X_today features")
-
-    # Model-based Feature Selection: RF, XGB, or LGB — reduce to 200
-    st.write("Selecting top 200 features with model-based selection...")
-    selector_model = RandomForestClassifier(n_estimators=30, max_depth=5, n_jobs=1)
-    selector_model.fit(X, y)
-    sfm = SelectFromModel(selector_model, prefit=True, max_features=200, threshold=-np.inf)
-    X_reduced = sfm.transform(X)
-    X_today_reduced = sfm.transform(X_today)
-    reduced_features = np.array(X.columns)[sfm.get_support()]
-    st.write(f"Selected {len(reduced_features)} features for modeling.")
-
-    # Train/val split and scaling
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_reduced, y, test_size=0.2, random_state=42, stratify=y
-    )
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today_reduced)
-
-    # Fit ensemble models
-    st.write("Training models (XGB, LGBM, CatBoost, RF, GB, LR)...")
-    xgb_clf = xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
-    lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
-    cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
-    rf_clf = RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)
-    gb_clf = GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)
-    lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-    models_for_ensemble = [
-        ('xgb', xgb_clf),
-        ('lgb', lgb_clf),
-        ('cat', cat_clf),
-        ('rf', rf_clf),
-        ('gb', gb_clf),
-        ('lr', lr_clf),
-    ]
-    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    for name, model in models_for_ensemble:
-        try:
-            model.fit(X_train_scaled, y_train)
-        except Exception as e:
-            st.warning(f"{name} training failed: {e}")
-    ensemble.fit(X_train_scaled, y_train)
-
-    # Calibrate
-    st.write("Calibrating probabilities with isotonic regression...")
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:, 1]
-    ir = IsotonicRegression(out_of_bounds="clip")
-    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-    y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
-    y_today_pred_cal = ir.transform(y_today_pred)
-    today_df['hr_probability'] = y_today_pred_cal
-
-    # Context/streak/weather
+    # ---- Context for leaderboard display
     context_cols = ["player_name", "pitcher_team_code", "park"]
     context_cols_present = [c for c in context_cols if c in today_df.columns]
     orig_context = today_df[context_cols_present].copy() if context_cols_present else None
 
-    today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
-    today_df['weather_rating'] = today_df['weather_multiplier'].apply(weather_rating)
-    today_df = add_streak_features(event_df, today_df)
-    today_df['streak_label'] = today_df.apply(assign_streak_label, axis=1)
-    today_df['wind_speed_rating'] = today_df['wind_mph'].apply(rate_wind_speed) if 'wind_mph' in today_df else ""
-    today_df['humidity_rating'] = today_df['humidity'].apply(rate_humidity) if 'humidity' in today_df else ""
-    today_df['temperature_rating'] = today_df['temp'].apply(rate_temperature) if 'temp' in today_df else ""
-    today_df['park_rating'] = today_df['park'].apply(rate_park) if 'park' in today_df else ""
-    today_df['wind_dir_rating'] = today_df['wind_dir_string'].apply(rate_wind_dir) if 'wind_dir_string' in today_df else ""
-    today_df['weather_labels'] = today_df.apply(combine_weather_labels, axis=1)
+    # ==== 1. Feature Selection: Model-based + Permutation Importances ====
+    feat_cols_train = set(get_valid_feature_cols(event_df))
+    feat_cols_today = set(get_valid_feature_cols(today_df))
+    feature_cols = sorted(list(feat_cols_train & feat_cols_today))
+    st.write(f"Number of available features: {len(feature_cols)}")
 
-    today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    X = clean_X(event_df[feature_cols])
+    y = event_df[target_col].astype(int)
+    X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
+    X = downcast_df(X)
+    X_today = downcast_df(X_today)
+    nan_inf_check(X, "X features")
+    nan_inf_check(X_today, "X_today features")
+
+    st.write("Running XGBoost for model-based feature importances...")
+    xgb_fs = xgb.XGBClassifier(n_estimators=60, max_depth=6, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
+    xgb_fs.fit(X, y)
+    feature_importances = pd.Series(xgb_fs.feature_importances_, index=X.columns)
+    top_xgb = feature_importances.sort_values(ascending=False).head(200).index.tolist()
+
+    # --- Permutation importances on validation
+    X_train, X_val, y_train, y_val = train_test_split(X[top_xgb], y, test_size=0.2, random_state=42, stratify=y)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_today_scaled = scaler.transform(X_today[top_xgb])
+    xgb_fs.fit(X_train_scaled, y_train)
+    perm_imp = permutation_importance(xgb_fs, X_val_scaled, y_val, n_repeats=8, random_state=42)
+    pi_scores = pd.Series(perm_imp.importances_mean, index=top_xgb)
+    pi_features = pi_scores.sort_values(ascending=False).head(60).index.tolist()
+    st.write(f"Top 60 permutation features: {pi_features}")
+
+    # --- Final features used
+    final_features = [f for f in pi_features if f in top_xgb]
+    st.write(f"Final features (used in stack): {final_features}")
+
+    # ==== 2. Meta-Features/Interactions ====
+    from itertools import combinations
+    top10 = final_features[:10]
+    interaction_features = []
+    for f1, f2 in combinations(top10, 2):
+        X_train[f'{f1}_x_{f2}'] = X_train[f1] * X_train[f2]
+        X_val[f'{f1}_x_{f2}'] = X_val[f1] * X_val[f2]
+        X_today_scaled = np.hstack([X_today_scaled, (X_today[f1] * X_today[f2]).values.reshape(-1,1)])
+        interaction_features.append(f'{f1}_x_{f2}')
+    st.write(f"Added {len(interaction_features)} interaction features.")
+
+    # ==== 3. Model Stacking ====
+    def make_base_learners():
+        return [
+            ('xgb', xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)),
+            ('lgb', lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)),
+            ('cat', cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)),
+            ('rf', RandomForestClassifier(n_estimators=60, max_depth=8, n_jobs=1)),
+            ('gb', GradientBoostingClassifier(n_estimators=60, max_depth=6, learning_rate=0.08)),
+            ('lr', LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1))
+        ]
+
+    base_models = make_base_learners()
+    meta_train = np.zeros((X_train.shape[0], len(base_models)))
+    meta_val = np.zeros((X_val.shape[0], len(base_models)))
+    for i, (name, model) in enumerate(base_models):
+        model.fit(X_train, y_train)
+        meta_train[:, i] = model.predict_proba(X_train)[:,1]
+        meta_val[:, i] = model.predict_proba(X_val)[:,1]
+    meta_learner = LogisticRegression(max_iter=400)
+    meta_learner.fit(meta_train, y_train)
+    val_meta_pred = meta_learner.predict_proba(meta_val)[:,1]
+    auc = roc_auc_score(y_val, val_meta_pred)
+    ll = log_loss(y_val, val_meta_pred)
+    st.info(f"Stacked Ensemble Validation AUC: **{auc:.4f}** — LogLoss: **{ll:.4f}**")
+
+    # Calibration
+    ir = IsotonicRegression(out_of_bounds="clip")
+    val_meta_pred_cal = ir.fit_transform(val_meta_pred, y_val)
+
+    # ==== 4. Today’s Prediction ====
+    meta_today = np.zeros((X_today_scaled.shape[0], len(base_models)))
+    for i, (name, model) in enumerate(base_models):
+        meta_today[:, i] = model.predict_proba(X_today_scaled)[:,1]
+    y_today_pred = meta_learner.predict_proba(meta_today)[:, 1]
+    y_today_pred_cal = ir.transform(y_today_pred)
+    today_df['hr_probability'] = y_today_pred_cal
+
+    # ==== 5. Meta-Ranker Booster ====
     today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
     today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
     today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
@@ -316,61 +264,35 @@ if event_file is not None and today_file is not None:
     meta_booster.fit(X_meta, y_meta)
     today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
     today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
+
+    # ==== 6. Context, Weather, Streak Labels ====
+    today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
+    today_df = add_streak_features(event_df, today_df)
+    today_df['streak_label'] = today_df.apply(assign_streak_label, axis=1)
+
+    # ==== 7. Leaderboard Output ====
+    leaderboard_cols = []
+    if "player_name" in today_df.columns: leaderboard_cols.append("player_name")
+    leaderboard_cols += ["hr_probability", "meta_hr_rank_score", "weather_multiplier", "streak_label"]
     if orig_context is not None:
-        today_df = today_df.merge(orig_context, on="player_name", how="left")
-
-    desired_cols = [
-        "player_name", "pitcher_team_code", "park",
-        "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
-        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating",
-        "park_rating", "wind_dir_rating", "weather_labels"
-    ]
-    cols = [c for c in desired_cols if c in today_df.columns]
-    leaderboard = today_df[cols].copy()
-
-    # Round for display
-    for col, n in [("hr_probability", 4), ("meta_hr_rank_score", 4), ("weather_multiplier", 3)]:
-        if col in leaderboard.columns:
-            leaderboard[col] = leaderboard[col].round(n)
-
-    st.write("Columns in leaderboard:", leaderboard.columns.tolist())  # For debug
-
-    top_n = 30
+        leaderboard_cols += [c for c in orig_context.columns if c not in leaderboard_cols]
+    leaderboard = today_df[leaderboard_cols].copy()
+    leaderboard = leaderboard.round(4)
     leaderboard_top = leaderboard.head(top_n)
-    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI, Weather & Streak Context)**")
+
+    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI World Class)**")
     st.dataframe(leaderboard_top, use_container_width=True)
     st.download_button(
         f"⬇️ Download Top {top_n} Leaderboard CSV",
         data=leaderboard_top.to_csv(index=False),
         file_name=f"top{top_n}_leaderboard.csv"
     )
-
-    import matplotlib.pyplot as plt
-    if "hr_probability" in leaderboard_top.columns:
-        st.subheader("📊 HR Probability Distribution (Top 30)")
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
-        ax.invert_yaxis()
-        ax.set_xlabel('HR Probability')
-        ax.set_ylabel('Player')
-        st.pyplot(fig)
-
-    if 'meta_booster' in locals() and 'meta_features' in locals():
-        st.subheader("🔎 Meta-Ranker Feature Importance")
-        meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
-        st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
-
-    # Optional: Download the full prediction file with all features
     st.download_button(
-        "⬇️ Download Full Prediction CSV",
+        f"⬇️ Download Full Prediction CSV",
         data=today_df.to_csv(index=False),
-        file_name="today_hr_predictions.csv"
+        file_name=f"full_hr_predictions.csv"
     )
-
-    # Clean up memory after major processing
-    del X, X_today, X_train, X_val, X_train_scaled, X_val_scaled, X_today_scaled
-    del X_reduced, X_today_reduced, ensemble, models_for_ensemble
-    gc.collect()
+    st.success("Done! This leaderboard is ready for prime time. All steps are self-documented in code for full transparency and reproducibility.")
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
