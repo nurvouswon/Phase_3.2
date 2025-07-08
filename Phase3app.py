@@ -6,20 +6,19 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
-from sklearn.inspection import permutation_importance
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
 import matplotlib.pyplot as plt
-from scipy.stats import zscore
-from itertools import combinations
 
 st.set_page_config("🏆 MLB Home Run Predictor — Supercharged Edition", layout="wide")
 st.title("🏆 MLB Home Run Predictor — State of the Art, Supercharged, Debug-First")
 
 # =========== BASE UTILITY FUNCTIONS ===========
-def safe_read(path):
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def safe_read_cached(path):
     fn = str(getattr(path, 'name', path)).lower()
     if fn.endswith('.parquet'):
         return pd.read_parquet(path)
@@ -66,15 +65,6 @@ def get_valid_feature_cols(df, drop=None):
     if drop: base_drop = base_drop.union(drop)
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
-
-def downcast_df(df):
-    float_cols = df.select_dtypes(include=['float'])
-    int_cols = df.select_dtypes(include=['int', 'int64', 'int32'])
-    for col in float_cols:
-        df[col] = pd.to_numeric(df[col], downcast='float')
-    for col in int_cols:
-        df[col] = pd.to_numeric(df[col], downcast='integer')
-    return df
 
 def nan_inf_check(X, name):
     if isinstance(X, pd.DataFrame):
@@ -134,7 +124,6 @@ def drift_check(train, today, n=5):
         tmean = np.nanmean(train[c])
         tstd = np.nanstd(train[c])
         dmean = np.nanmean(today[c])
-        dstd = np.nanstd(today[c])
         if tstd > 0 and abs(tmean - dmean) / tstd > n:
             drifted.append(c)
     return drifted
@@ -148,26 +137,23 @@ def winsorize_clip(X, limits=(0.01, 0.99)):
     return X
 
 def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=None, hr_col='hr_probability'):
-    """Apply a sticky rank meta-boost so HRs stick to the top N spots more often."""
-    # Use prior leaderboard rank or previous model (if available) to add persistence
     stick = df[hr_col].copy()
     if prev_rank_col and prev_rank_col in df.columns:
-        # Boost those who ranked high before
         prev_rank = df[prev_rank_col].rank(method='min', ascending=False)
         stick = stick + stickiness_boost * (prev_rank <= top_k)
     else:
-        # If no prior info, just boost the current top K
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
 # ---- APP START ----
+
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
 if event_file is not None and today_file is not None:
     with st.spinner("Loading and prepping files..."):
-        event_df = safe_read(event_file)
-        today_df = safe_read(today_file)
+        event_df = safe_read_cached(event_file)
+        today_df = safe_read_cached(today_file)
         event_df = event_df.dropna(axis=1, how='all')
         today_df = today_df.dropna(axis=1, how='all')
         event_df = dedup_columns(event_df)
@@ -199,7 +185,6 @@ if event_file is not None and today_file is not None:
     X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
     feature_debug(X)
 
-    # --- Drop columns with >30% NaNs for safety
     nan_thresh = 0.3
     nan_pct = X.isna().mean()
     drop_cols = nan_pct[nan_pct > nan_thresh].index.tolist()
@@ -208,14 +193,12 @@ if event_file is not None and today_file is not None:
         X = X.drop(columns=drop_cols)
         X_today = X_today.drop(columns=drop_cols, errors='ignore')
 
-    # --- Drop near-zero variance features
     nzv_cols = X.loc[:, X.nunique() <= 2].columns.tolist()
     if nzv_cols:
         st.warning(f"Dropping {len(nzv_cols)} near-constant features.")
         X = X.drop(columns=nzv_cols)
         X_today = X_today.drop(columns=nzv_cols, errors='ignore')
 
-    # --- Remove perfectly correlated features (keep only one in each group)
     corrs = X.corr().abs()
     upper = corrs.where(np.triu(np.ones(corrs.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > 0.999)]
@@ -224,10 +207,10 @@ if event_file is not None and today_file is not None:
         X = X.drop(columns=to_drop)
         X_today = X_today.drop(columns=to_drop, errors='ignore')
 
-    # --- Winsorize/Clip
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
-     # ===> LIMIT TO 200 FEATURES BY VARIANCE (Add this section!) <===
+
+    # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
     max_feats = 200
     variances = X.var().sort_values(ascending=False)
     top_feat_names = variances.head(max_feats).index.tolist()
@@ -248,7 +231,6 @@ if event_file is not None and today_file is not None:
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # ====== Drift Detection ======
     drifted = drift_check(X_train, X_today, n=6)
     if drifted:
         st.warning(f"⚠️ Drift detected in these features: {drifted[:12]} (distribution changed vs training!)")
@@ -283,18 +265,15 @@ if event_file is not None and today_file is not None:
 
     # =========== STICKY, META-BOOSTED LEADERBOARD UPGRADES ===========
     st.write("Sticky meta-learning leaderboard upgrades (supercharging for Top 5/10/30 accuracy)...")
-    # Save prior probability as base
     today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
     today_df['hr_base_rank'] = today_df['hr_probability'].rank(method='min', ascending=False)
-    # Sticky boost: prefer HRs that have been ranked highly before
     today_df['sticky_hr_boost'] = stickiness_rank_boost(today_df, top_k=10, stickiness_boost=0.19, prev_rank_col=None, hr_col='hr_probability')
-    # Additional: gap-based meta feature
     today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
     today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
     today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
     today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
     meta_pseudo_y = today_df['sticky_hr_boost'].copy()
-    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18  # Extra stick for top 10
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18
     meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
     from sklearn.ensemble import GradientBoostingRegressor
     meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
@@ -356,10 +335,9 @@ if event_file is not None and today_file is not None:
 
     # Meta-Ranker Feature Importance
     st.subheader("🔎 Meta-Ranker Feature Importance")
-    meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
-    st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
+    importances = pd.Series(meta_booster.feature_importances_, index=meta_features)
+    st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
 
-    # Quick check for any NaNs or impossible values in leaderboard
     if leaderboard_top.isna().any().any():
         st.warning("⚠️ NaNs detected in leaderboard! Double-check the input features.")
     if (leaderboard_top[sort_col] < 0).any() or (leaderboard_top[sort_col] > 1).any():
