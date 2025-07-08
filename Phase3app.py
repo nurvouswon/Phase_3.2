@@ -6,7 +6,6 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
-from sklearn.inspection import permutation_importance
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
@@ -154,7 +153,6 @@ def label_smooth(y, smooth_amt=0.1):
     return np.where(y == 1, 1 - smooth_amt, smooth_amt)
 
 def auto_feature_crosses(X, max_cross=20):
-    # Add top variance X*Y crosses (no memory bombs)
     crosses = []
     means = X.mean()
     var_scores = {}
@@ -170,7 +168,6 @@ def auto_feature_crosses(X, max_cross=20):
     return X
 
 def remove_outliers(X, y, method="iforest", contamination=0.012):
-    # Use IsolationForest (or LOF if you prefer)
     if method == "iforest":
         mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
     else:
@@ -255,12 +252,6 @@ if event_file is not None and today_file is not None:
     # ===== PHASE 1: Feature Crosses & Outlier Removal =====
     X = auto_feature_crosses(X, max_cross=24)
     X_today = auto_feature_crosses(X_today, max_cross=24)
-    # === ENSURE X_today MATCHES X (column order, missing columns) ===
-    cols_final = X.columns.tolist()
-    for c in cols_final:
-        if c not in X_today.columns:
-            X_today[c] = -1  # Safe fill for any missing features
-    X_today = X_today[cols_final]
     nan_inf_check(X, "X after crosses")
     nan_inf_check(X_today, "X_today after crosses")
     # Outlier removal (train only)
@@ -268,20 +259,19 @@ if event_file is not None and today_file is not None:
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
     st.write(f"Rows after outlier removal: {X.shape[0]}")
 
-    # ===== PHASE 1: Label Smoothing =====
+    # ===== PHASE 1: Label Smoothing (for calibration/meta only) =====
     y_smooth = label_smooth(y, smooth_amt=0.09)
 
     # ===== PHASE 1: Repeated Stratified KFold Bagging =====
     n_splits = 5
     n_repeats = 3
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
-    y_oof = np.zeros_like(y_smooth, dtype=float)
-    val_preds = np.zeros((len(y_smooth), n_repeats * n_splits))
+    val_preds = np.zeros((len(y), n_repeats * n_splits))
     test_preds = []
     scaler = StandardScaler()
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-        y_tr, y_va = y_smooth[tr_idx], y_smooth[va_idx]
+        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]   # *** Use 0/1, not y_smooth ***
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
@@ -311,15 +301,15 @@ if event_file is not None and today_file is not None:
     # ===== PHASE 1: BetaCalibration & Isotonic =====
     st.write("Calibrating probabilities (BetaCalibration & Isotonic)...")
     bc = BetaCalibration(parameters="abm")
-    bc.fit(y_val_bag.reshape(-1,1), y)
+    bc.fit(y_val_bag.reshape(-1,1), y_smooth)   # calibrate on smooth labels
     y_val_beta = bc.predict(y_val_bag.reshape(-1,1))
     y_today_beta = bc.predict(y_today_bag.reshape(-1,1))
     ir = IsotonicRegression(out_of_bounds="clip")
-    y_val_iso = ir.fit_transform(y_val_bag, y)
+    y_val_iso = ir.fit_transform(y_val_bag, y_smooth)   # calibrate on smooth labels
     y_today_iso = ir.transform(y_today_bag)
     # Use the best calibration (whichever has higher val logloss)
-    val_logloss_beta = log_loss(y, y_val_beta)
-    val_logloss_iso = log_loss(y, y_val_iso)
+    val_logloss_beta = log_loss(y_smooth, y_val_beta)
+    val_logloss_iso = log_loss(y_smooth, y_val_iso)
     if val_logloss_beta < val_logloss_iso:
         st.success(f"BetaCalibration used (logloss={val_logloss_beta:.4f})")
         hr_probs = y_today_beta
@@ -341,6 +331,7 @@ if event_file is not None and today_file is not None:
     meta_pseudo_y = today_df['sticky_hr_boost'].copy()
     meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18  # Extra stick for top 10
     meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
+    # Meta-ranker for sticky leaderboard top-10/30 focus
     from sklearn.ensemble import GradientBoostingRegressor
     meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
     X_meta = today_df[meta_features].values
@@ -404,12 +395,14 @@ if event_file is not None and today_file is not None:
     importances = pd.Series(meta_booster.feature_importances_, index=meta_features)
     st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
 
+    # Diagnostics
     if leaderboard_top.isna().any().any():
         st.warning("⚠️ NaNs detected in leaderboard! Double-check the input features.")
     if (leaderboard_top[sort_col] < 0).any() or (leaderboard_top[sort_col] > 1).any():
         st.warning("⚠️ Some final probabilities are out of [0,1] range!")
 
     # Display drifted features if any
+    drifted = drift_check(X, X_today, n=6)
     if drifted:
         st.markdown("#### ⚡ **Feature Drift Diagnostics**")
         st.write("These features have unusual mean/std changes between training and today, check if input context shifted:", drifted)
