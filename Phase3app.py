@@ -145,6 +145,43 @@ def assign_streak_label(row):
         return "Breakout Watch"
     return ""
 
+def rate_wind_speed(ws):
+    if pd.isnull(ws): return ""
+    if ws >= 15: return "Extreme Wind"
+    if ws >= 10: return "Strong Wind"
+    if ws >= 5:  return "Mild Wind"
+    return "Calm"
+
+def rate_humidity(hum):
+    if pd.isnull(hum): return ""
+    if hum >= 70: return "Very Humid"
+    if hum >= 50: return "Humid"
+    if hum <= 30: return "Dry"
+    return "Moderate"
+
+def rate_temperature(temp):
+    if pd.isnull(temp): return ""
+    if temp >= 90: return "Very Hot"
+    if temp >= 75: return "Hot"
+    if temp <= 50: return "Cold"
+    return "Mild"
+
+def rate_park(park):
+    if pd.isnull(park): return ""
+    s = str(park).upper()
+    if "COORS" in s: return "HR Paradise"
+    if "PETCO" in s: return "Pitcher's Park"
+    if "DODGER" in s or "ORACLE" in s: return "Neutral Park"
+    return "Neutral Park"
+
+def rate_wind_dir(wd):
+    if pd.isnull(wd): return ""
+    wd_str = str(wd).lower()
+    if "out" in wd_str: return "HR Wind"
+    if "in" in wd_str:  return "HR Suppressing"
+    if "left" in wd_str or "right" in wd_str: return "Crosswind"
+    return "Neutral"
+
 def combine_weather_labels(row):
     parts = [
         row.get('wind_speed_rating', ""),
@@ -168,7 +205,6 @@ if event_file is not None and today_file is not None:
         today_df = dedup_columns(today_df)
         event_df = event_df.reset_index(drop=True)
         today_df = today_df.reset_index(drop=True)
-        st.write(f"Event: {event_df.shape}, Today: {today_df.shape}")
         if find_duplicate_columns(event_df):
             st.error(f"Duplicate columns in event file")
             st.stop()
@@ -188,10 +224,7 @@ if event_file is not None and today_file is not None:
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
-    st.write(f"Number of features (before selection): {len(feature_cols)}")
-    if len(feature_cols) > 200:
-        feature_cols = feature_cols[:200]
-        st.warning("Limiting features to first 200 for stability.")
+    st.write(f"Number of features (all mutual): {len(feature_cols)}")
 
     context_cols = ["player_name", "pitcher_team_code", "park"]
     context_cols_present = [c for c in context_cols if c in today_df.columns]
@@ -203,63 +236,48 @@ if event_file is not None and today_file is not None:
         st.stop()
     orig_context = today_df[context_cols_present].copy()
 
-    X = clean_X(event_df[feature_cols])
+    # -- Use only up to 200 best features by XGBoost importance --
+    X_full = clean_X(event_df[feature_cols])
     y = event_df[target_col].astype(int)
-    X_today = clean_X(today_df[feature_cols], train_cols=X.columns)
-    X = downcast_df(X)
-    X_today = downcast_df(X_today)
-    nan_inf_check(X, "X features")
-    nan_inf_check(X_today, "X_today features")
+    X_today_full = clean_X(today_df[feature_cols], train_cols=X_full.columns)
+    X_full = downcast_df(X_full)
+    X_today_full = downcast_df(X_today_full)
 
-    st.write("Splitting for validation and scaling...")
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    y_train = np.asarray(y_train, dtype=np.int32).reshape(-1)
-    y_val = np.asarray(y_val, dtype=np.int32).reshape(-1)
+    # Run XGBoost feature importances on all features, select top 200
+    st.write("Running XGBoost for feature importance selection (max 200 features)...")
+    xgb_fs = xgb.XGBClassifier(n_estimators=50, max_depth=6, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
+    xgb_fs.fit(X_full, y)
+    fi_series = pd.Series(xgb_fs.feature_importances_, index=X_full.columns)
+    top_features = fi_series.sort_values(ascending=False).head(200).index.tolist()
+    st.write(f"Selected top {len(top_features)} features.")
 
+    # Only use these for next steps!
+    X = X_full[top_features]
+    X_today = X_today_full[top_features]
+
+    # Split for validation
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
     X_today_scaled = scaler.transform(X_today)
 
-    # --- Feature importance selection using XGB + Permutation (top 40->30) ---
-    st.write("Running XGBoost for model-based feature importances...")
-    xgb_fs = xgb.XGBClassifier(n_estimators=50, max_depth=6, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
-    xgb_fs.fit(X, y)
-    feature_importances = pd.Series(xgb_fs.feature_importances_, index=X.columns)
-    top_features = feature_importances.sort_values(ascending=False).head(40).index.tolist()
-    st.write(f"Top 40 features by XGB importance: {top_features}")
-
-    # Permutation importance
+    # Permutation importance on *top_features only* (lengths now match)
     st.write("Calculating permutation importances (validation set)...")
-    perm_imp = permutation_importance(xgb_fs, X_val_scaled, y_val, n_repeats=5, random_state=42)
+    xgb_fs.fit(X_train_scaled, y_train)
+    perm_imp = permutation_importance(xgb_fs, X_val_scaled, y_val, n_repeats=10, random_state=42)
     pi_scores = pd.Series(perm_imp.importances_mean, index=top_features)
     pi_features = pi_scores.sort_values(ascending=False).head(30).index.tolist()
     st.write(f"Top 30 features by permutation importance: {pi_features}")
 
-    # Final features: intersection
+    # Final features for all modeling
     final_features = [f for f in pi_features if f in top_features]
-    st.write(f"Final features used in model: {final_features}")
+    X_train_final = X_train[final_features]
+    X_val_final = X_val[final_features]
+    X_today_final = X_today[final_features]
 
-    # Reduce feature set for modeling
-    X_train_final = pd.DataFrame(X_train, columns=X.columns)[final_features].copy()
-    X_val_final = pd.DataFrame(X_val, columns=X.columns)[final_features].copy()
-    X_today_final = pd.DataFrame(X_today, columns=X.columns)[final_features].copy()
-
-    # Meta-feature creation (pairwise for top 10)
-    from itertools import combinations
-    interaction_features = []
-    top10 = final_features[:10]
-    for f1, f2 in combinations(top10, 2):
-        for dfset, df in zip(['train','val','today'], [X_train_final, X_val_final, X_today_final]):
-            df[f'{f1}_x_{f2}'] = df[f1] * df[f2]
-            df[f'{f1}_div_{f2}'] = np.where(df[f2]!=0, df[f1]/df[f2], 0)
-        interaction_features.extend([f'{f1}_x_{f2}', f'{f1}_div_{f2}'])
-    st.write(f"Added {len(interaction_features)} meta-feature interactions.")
-
-    # Robust ensemble
-    st.write("Training ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
+    # Models
+    st.write("Training ensemble...")
     xgb_clf = xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
     lgb_clf = lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.07, n_jobs=1)
     cat_clf = cb.CatBoostClassifier(iterations=80, depth=6, learning_rate=0.08, verbose=0, thread_count=1)
@@ -277,14 +295,12 @@ if event_file is not None and today_file is not None:
     for name, model in models_for_ensemble:
         try:
             model.fit(X_train_final, y_train)
-            st.write(f"{name} fit success.")
         except Exception as e:
             st.warning(f"{name} training failed: {e}")
     ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
     ensemble.fit(X_train_final, y_train)
 
-    # Calibrate
-    st.write("Calibrating probabilities (isotonic regression)...")
+    st.write("Calibrating probabilities with isotonic regression...")
     y_val_pred = ensemble.predict_proba(X_val_final)[:, 1]
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
@@ -292,24 +308,51 @@ if event_file is not None and today_file is not None:
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    # Add weather & streaks
     today_df['weather_multiplier'] = today_df.apply(compute_weather_multiplier, axis=1)
     today_df['weather_rating'] = today_df['weather_multiplier'].apply(weather_rating)
     today_df = add_streak_features(event_df, today_df)
     today_df['streak_label'] = today_df.apply(assign_streak_label, axis=1)
+    today_df['wind_speed_rating'] = today_df['wind_mph'].apply(rate_wind_speed) if 'wind_mph' in today_df else ""
+    today_df['humidity_rating'] = today_df['humidity'].apply(rate_humidity) if 'humidity' in today_df else ""
+    today_df['temperature_rating'] = today_df['temp'].apply(rate_temperature) if 'temp' in today_df else ""
+    today_df['park_rating'] = today_df['park'].apply(rate_park) if 'park' in today_df else ""
+    today_df['wind_dir_rating'] = today_df['wind_dir_string'].apply(rate_wind_dir) if 'wind_dir_string' in today_df else ""
+    today_df['weather_labels'] = today_df.apply(combine_weather_labels, axis=1)
 
-    # Leaderboard
     today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
-    top_n = 30
-    leaderboard_cols = []
-    if "player_name" in today_df.columns:
-        leaderboard_cols.append("player_name")
-    leaderboard_cols += ["hr_probability", "weather_multiplier", "weather_rating", "streak_label"]
-    leaderboard = today_df[leaderboard_cols].copy()
-    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-    leaderboard["weather_multiplier"] = leaderboard["weather_multiplier"].round(3)
-    leaderboard_top = leaderboard.head(top_n)
+    today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
+    today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
+    today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
+    today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
+    meta_pseudo_y = today_df['hr_probability'].copy()
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.15
+    meta_features = ['hr_probability', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
+    X_meta = today_df[meta_features].values
+    y_meta = meta_pseudo_y.values
+    meta_booster = GradientBoostingRegressor(n_estimators=80, max_depth=3, learning_rate=0.1)
+    meta_booster.fit(X_meta, y_meta)
+    today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
+    today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
+    today_df = today_df.merge(orig_context, on="player_name", how="left")
 
+    desired_cols = [
+        "player_name", "pitcher_team_code", "park",
+        "hr_probability", "meta_hr_rank_score", "weather_multiplier", "weather_rating",
+        "streak_label", "wind_speed_rating", "humidity_rating", "temperature_rating",
+        "park_rating", "wind_dir_rating", "weather_labels"
+    ]
+    cols = [c for c in desired_cols if c in today_df.columns]
+    leaderboard = today_df[cols].copy()
+
+    # Round key columns for clean display
+    for col, n in [("hr_probability", 4), ("meta_hr_rank_score", 4), ("weather_multiplier", 3)]:
+        if col in leaderboard.columns:
+            leaderboard[col] = leaderboard[col].round(n)
+
+    st.write("Columns in leaderboard:", leaderboard.columns.tolist())  # For debug
+
+    top_n = 30
+    leaderboard_top = leaderboard.head(top_n)
     st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (AI, Weather & Streak Context)**")
     st.dataframe(leaderboard_top, use_container_width=True)
     st.download_button(
@@ -317,7 +360,29 @@ if event_file is not None and today_file is not None:
         data=leaderboard_top.to_csv(index=False),
         file_name=f"top{top_n}_leaderboard.csv"
     )
-    st.write(f"Number of features used for modeling: {len(final_features) + len(interaction_features)}")
+
+    # Visual: HR Probability Distribution (Top 30)
+    if "hr_probability" in leaderboard_top.columns:
+        st.subheader("📊 HR Probability Distribution (Top 30)")
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top["hr_probability"], color='dodgerblue')
+        ax.invert_yaxis()
+        ax.set_xlabel('HR Probability')
+        ax.set_ylabel('Player')
+        st.pyplot(fig)
+
+    # Visual: Meta-Ranker Feature Importance
+    if 'meta_booster' in locals() and 'meta_features' in locals():
+        st.subheader("🔎 Meta-Ranker Feature Importance")
+        meta_imp = pd.Series(meta_booster.feature_importances_, index=meta_features)
+        st.dataframe(meta_imp.sort_values(ascending=False).to_frame("importance"))
+
+    # Optionally: Download full today file
+    st.download_button(
+        "⬇️ Download All Today's Predictions",
+        data=today_df.to_csv(index=False),
+        file_name="all_today_predictions.csv"
+    )
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
