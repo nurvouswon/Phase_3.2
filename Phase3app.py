@@ -78,9 +78,10 @@ def nan_inf_check(X, name):
     if isinstance(X, pd.DataFrame):
         X_num = X.select_dtypes(include=[np.number])
         nans = X_num.isna().sum().sum()
-        infs = np.isinf(X_num.values).sum()
+        # Force conversion to float64 for isinf
+        infs = np.isinf(X_num.astype(np.float64).values).sum()
     else:
-        arr = np.asarray(X)
+        arr = np.asarray(X, dtype=np.float64)
         nans = np.isnan(arr).sum()
         infs = np.isinf(arr).sum()
     if nans > 0 or infs > 0:
