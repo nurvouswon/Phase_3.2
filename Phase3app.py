@@ -1,22 +1,24 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import train_test_split, RepeatedStratifiedKFold
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, IsolationForest
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
+from sklearn.inspection import permutation_importance
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
+from betacal import BetaCalibration
+from sklearn.neighbors import LocalOutlierFactor
 import matplotlib.pyplot as plt
 
-st.set_page_config("🏆 MLB Home Run Predictor — Supercharged Edition", layout="wide")
-st.title("🏆 MLB Home Run Predictor — State of the Art, Supercharged, Debug-First")
+st.set_page_config("🏆 MLB Home Run Predictor — Full Phase 1", layout="wide")
+st.title("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1")
 
-# =========== BASE UTILITY FUNCTIONS ===========
-
+# ================= BASE UTILITY FUNCTIONS ================
 @st.cache_data(show_spinner=False, max_entries=2)
 def safe_read_cached(path):
     fn = str(getattr(path, 'name', path)).lower()
@@ -145,6 +147,36 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
+# =============== PHASE 1: PLUG-AND-PLAY ENHANCEMENTS ================
+
+def label_smooth(y, smooth_amt=0.1):
+    # Soften 0 to 0.1, 1 to 0.9 (can tweak)
+    return np.where(y == 1, 1 - smooth_amt, smooth_amt)
+
+def auto_feature_crosses(X, max_cross=20):
+    # Add top variance X*Y crosses (no memory bombs)
+    crosses = []
+    means = X.mean()
+    var_scores = {}
+    for i, f1 in enumerate(X.columns):
+        for j, f2 in enumerate(X.columns):
+            if i >= j: continue
+            cross = X[f1] * X[f2]
+            var_scores[(f1, f2)] = cross.var()
+    top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
+    for (f1, f2), _ in top_pairs:
+        name = f"{f1}*{f2}"
+        X[name] = X[f1] * X[f2]
+    return X
+
+def remove_outliers(X, y, method="iforest", contamination=0.012):
+    # Use IsolationForest (or LOF if you prefer)
+    if method == "iforest":
+        mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
+    else:
+        mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
+    return X[mask], y[mask]
+
 # ---- APP START ----
 
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
@@ -178,7 +210,6 @@ if event_file is not None and today_file is not None:
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
 
-    # ---- Feature Filtering ----
     feature_cols = sorted(list(set(get_valid_feature_cols(event_df)) & set(get_valid_feature_cols(today_df))))
     st.write(f"Feature count before filtering: {len(feature_cols)}")
     X = clean_X(event_df[feature_cols])
@@ -221,47 +252,76 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    # =========== Split & Scale ===========
+    # ===== PHASE 1: Feature Crosses & Outlier Removal =====
+    X = auto_feature_crosses(X, max_cross=24)
+    X_today = auto_feature_crosses(X_today, max_cross=24)
+    nan_inf_check(X, "X after crosses")
+    nan_inf_check(X_today, "X_today after crosses")
+    # Outlier removal (train only)
     y = event_df[target_col].astype(int)
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
+    X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
+    st.write(f"Rows after outlier removal: {X.shape[0]}")
+
+    # ===== PHASE 1: Label Smoothing =====
+    y_smooth = label_smooth(y, smooth_amt=0.09)
+
+    # ===== PHASE 1: Repeated Stratified KFold Bagging =====
+    n_splits = 5
+    n_repeats = 3
+    rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
+    y_oof = np.zeros_like(y_smooth, dtype=float)
+    val_preds = np.zeros((len(y_smooth), n_repeats * n_splits))
+    test_preds = []
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_today_scaled = scaler.transform(X_today)
+    for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
+        X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
+        y_tr, y_va = y_smooth[tr_idx], y_smooth[va_idx]
+        sc = scaler.fit(X_tr)
+        X_tr_scaled = sc.transform(X_tr)
+        X_va_scaled = sc.transform(X_va)
+        X_today_scaled = sc.transform(X_today)
+        xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
+        lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
+        cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
+        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
+        gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
+        lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+        models_for_ensemble = [
+            ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
+        ]
+        ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+        for name, model in models_for_ensemble:
+            try:
+                model.fit(X_tr_scaled, y_tr)
+            except Exception as e:
+                st.warning(f"{name} training failed in fold: {e}")
+        ensemble.fit(X_tr_scaled, y_tr)
+        val_preds[va_idx, fold] = ensemble.predict_proba(X_va_scaled)[:, 1]
+        test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
+    # Average bagged predictions
+    y_val_bag = val_preds.mean(axis=1)
+    y_today_bag = np.mean(np.column_stack(test_preds), axis=1)
 
-    drifted = drift_check(X_train, X_today, n=6)
-    if drifted:
-        st.warning(f"⚠️ Drift detected in these features: {drifted[:12]} (distribution changed vs training!)")
-
-    # =========== ML Training ===========
-    st.write("Training state-of-the-art ensemble (XGB, LGBM, CatBoost, RF, GB, LR)...")
-    xgb_clf = xgb.XGBClassifier(n_estimators=120, max_depth=8, learning_rate=0.06, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
-    lgb_clf = lgb.LGBMClassifier(n_estimators=120, max_depth=8, learning_rate=0.06, n_jobs=1)
-    cat_clf = cb.CatBoostClassifier(iterations=120, depth=8, learning_rate=0.06, verbose=0, thread_count=1)
-    rf_clf = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=1)
-    gb_clf = GradientBoostingClassifier(n_estimators=100, max_depth=8, learning_rate=0.07)
-    lr_clf = LogisticRegression(max_iter=800, solver='lbfgs', n_jobs=1)
-    models_for_ensemble = [
-        ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
-    ]
-    ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-    for name, model in models_for_ensemble:
-        try:
-            model.fit(X_train_scaled, y_train)
-        except Exception as e:
-            st.warning(f"{name} training failed: {e}")
-    ensemble.fit(X_train_scaled, y_train)
-
-    # =========== Probability Calibration ===========
-    st.write("Calibrating probabilities with isotonic regression...")
-    y_val_pred = ensemble.predict_proba(X_val_scaled)[:, 1]
+    # ===== PHASE 1: BetaCalibration & Isotonic =====
+    st.write("Calibrating probabilities (BetaCalibration & Isotonic)...")
+    bc = BetaCalibration(parameters="abm")
+    bc.fit(y_val_bag.reshape(-1,1), y)
+    y_val_beta = bc.predict(y_val_bag.reshape(-1,1))
+    y_today_beta = bc.predict(y_today_bag.reshape(-1,1))
     ir = IsotonicRegression(out_of_bounds="clip")
-    y_val_pred_cal = ir.fit_transform(y_val_pred, y_val)
-    y_today_pred = ensemble.predict_proba(X_today_scaled)[:, 1]
-    y_today_pred_cal = ir.transform(y_today_pred)
-    today_df['hr_probability'] = y_today_pred_cal
+    y_val_iso = ir.fit_transform(y_val_bag, y)
+    y_today_iso = ir.transform(y_today_bag)
+    # Use the best calibration (whichever has higher val logloss)
+    val_logloss_beta = log_loss(y, y_val_beta)
+    val_logloss_iso = log_loss(y, y_val_iso)
+    if val_logloss_beta < val_logloss_iso:
+        st.success(f"BetaCalibration used (logloss={val_logloss_beta:.4f})")
+        hr_probs = y_today_beta
+    else:
+        st.success(f"Isotonic used (logloss={val_logloss_iso:.4f})")
+        hr_probs = y_today_iso
+
+    today_df['hr_probability'] = hr_probs
 
     # =========== STICKY, META-BOOSTED LEADERBOARD UPGRADES ===========
     st.write("Sticky meta-learning leaderboard upgrades (supercharging for Top 5/10/30 accuracy)...")
@@ -273,7 +333,7 @@ if event_file is not None and today_file is not None:
     today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
     today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
     meta_pseudo_y = today_df['sticky_hr_boost'].copy()
-    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18  # Extra stick for top 10
     meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
     from sklearn.ensemble import GradientBoostingRegressor
     meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
