@@ -227,7 +227,12 @@ if event_file is not None and today_file is not None:
     # --- Winsorize/Clip
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
-
+     # ===> LIMIT TO 200 FEATURES BY VARIANCE (Add this section!) <===
+    max_feats = 200
+    variances = X.var().sort_values(ascending=False)
+    top_feat_names = variances.head(max_feats).index.tolist()
+    X = X[top_feat_names]
+    X_today = X_today[top_feat_names]
     st.success(f"Final number of features after auto-filtering: {X.shape[1]}")
 
     nan_inf_check(X, "X features")
