@@ -156,9 +156,6 @@ if event_file is not None and today_file is not None:
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
 
-    # ======= LABEL TYPE FIX (INT) =======
-    event_df[target_col] = event_df[target_col].astype(int)
-
     value_counts = event_df[target_col].value_counts(dropna=False).reset_index()
     value_counts.columns = [target_col, 'count']
     st.write("Value counts for hr_outcome:")
