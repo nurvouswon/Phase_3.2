@@ -139,10 +139,13 @@ def drift_check(train, today, n=5):
             drifted.append(c)
     return drifted
 
-def winsorize_clip(X, limits=(0.005, 0.995)):
-    # For all numeric columns, clip extreme outliers
-    for col in X.select_dtypes(include=[np.number]).columns:
-        X[col] = X[col].clip(lower=X[col].quantile(limits[0]), upper=X[col].quantile(limits[1]))
+def winsorize_clip(X, limits=(0.01, 0.99)):
+    # Convert all columns to float before clipping/winsorizing to avoid Int64 bug
+    X = X.astype(float)
+    for col in X.columns:
+        lower = X[col].quantile(limits[0])
+        upper = X[col].quantile(limits[1])
+        X[col] = X[col].clip(lower=lower, upper=upper)
     return X
 
 # ---- APP START ----
