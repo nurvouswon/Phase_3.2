@@ -163,12 +163,9 @@ if event_file is not None and today_file is not None:
 
     # ==== ONE FEATURE CLUSTERING: keep one feature per highly correlated group ====
     st.markdown("## ⛓️ Feature Clustering: Keeping one feature per correlated group")
+    clust_thresh = 1.0  # Fixed threshold, no slider
 
-    clust_thresh = st.slider(
-        "One-Feature Clustering Correlation Threshold",
-        min_value=0.85, max_value=1.0, value=0.95, step=0.01
-    )
-
+    # Only keep features present in BOTH event and today sets (intersection)
     feat_cols_train = set(get_valid_feature_cols(event_df))
     feat_cols_today = set(get_valid_feature_cols(today_df))
     feature_cols = sorted(list(feat_cols_train & feat_cols_today))
@@ -179,7 +176,10 @@ if event_file is not None and today_file is not None:
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > clust_thresh)]
     feature_cols = [col for col in feature_cols if col not in to_drop]
-    st.write(f"Features retained after clustering: {len(feature_cols)}")
+
+    # FINAL INTERSECTION with today's columns to ensure no KeyError
+    feature_cols = [col for col in feature_cols if col in today_df.columns]
+    st.write(f"Features retained after clustering & intersection: {len(feature_cols)}")
     st.write(feature_cols)
 
     X = clean_X(event_df[feature_cols])
@@ -319,23 +319,6 @@ if event_file is not None and today_file is not None:
     leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
     leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
     leaderboard["overlay_multiplier"] = leaderboard["overlay_multiplier"].round(3)
-
-    # Show debug: Print stats for 3 players at every step
-    debug_names = ["Agustin Ramirez", "Matt Wallner", "Trenton Brooks"]
-
-    st.markdown("## 🐞 Debug: Raw Stats from today_df")
-    for name in debug_names:
-        st.write(f"{name} - Raw features:", today_df[today_df['player_name'] == name])
-
-    st.markdown("## 🐞 Debug: Model Input Vector (X_today)")
-    for name in debug_names:
-        ix = today_df["player_name"] == name
-        st.write(f"{name} - X_today input:", pd.DataFrame(X_today[ix], columns=X_today.columns if hasattr(X_today, "columns") else feature_cols))
-
-    st.markdown("## 🐞 Debug: Model Output Probabilities")
-    for name in debug_names:
-        prob = today_df.loc[today_df['player_name'] == name, "hr_probability"].values
-        st.write(f"{name} - hr_probability:", prob)
 
     # Change this value for Top 10 or Top 30 leaderboard
     top_n = 30
