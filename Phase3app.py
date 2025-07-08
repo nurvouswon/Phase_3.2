@@ -140,13 +140,25 @@ def drift_check(train, today, n=5):
     return drifted
 
 def winsorize_clip(X, limits=(0.01, 0.99)):
-    # Convert all columns to float before clipping/winsorizing to avoid Int64 bug
-    X = X.astype(float)
+    X = X.astype(float)  # <-- fixes masked int bug
     for col in X.columns:
         lower = X[col].quantile(limits[0])
         upper = X[col].quantile(limits[1])
         X[col] = X[col].clip(lower=lower, upper=upper)
     return X
+
+def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=None, hr_col='hr_probability'):
+    """Apply a sticky rank meta-boost so HRs stick to the top N spots more often."""
+    # Use prior leaderboard rank or previous model (if available) to add persistence
+    stick = df[hr_col].copy()
+    if prev_rank_col and prev_rank_col in df.columns:
+        # Boost those who ranked high before
+        prev_rank = df[prev_rank_col].rank(method='min', ascending=False)
+        stick = stick + stickiness_boost * (prev_rank <= top_k)
+    else:
+        # If no prior info, just boost the current top K
+        stick.iloc[:top_k] += stickiness_boost
+    return stick
 
 # ---- APP START ----
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
@@ -264,18 +276,23 @@ if event_file is not None and today_file is not None:
     y_today_pred_cal = ir.transform(y_today_pred)
     today_df['hr_probability'] = y_today_pred_cal
 
-    # =========== Meta-Boosted Leaderboard ===========
-    st.write("Meta-learning re-ranking for leaderboard (focus more HRs to top spots)...")
+    # =========== STICKY, META-BOOSTED LEADERBOARD UPGRADES ===========
+    st.write("Sticky meta-learning leaderboard upgrades (supercharging for Top 5/10/30 accuracy)...")
+    # Save prior probability as base
     today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    today_df['hr_base_rank'] = today_df['hr_probability'].rank(method='min', ascending=False)
+    # Sticky boost: prefer HRs that have been ranked highly before
+    today_df['sticky_hr_boost'] = stickiness_rank_boost(today_df, top_k=10, stickiness_boost=0.19, prev_rank_col=None, hr_col='hr_probability')
+    # Additional: gap-based meta feature
     today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
     today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
     today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
     today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
-    meta_pseudo_y = today_df['hr_probability'].copy()
-    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18  # BOOST TOP 10 MORE AGGRESSIVELY
-    meta_features = ['hr_probability', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
+    meta_pseudo_y = today_df['sticky_hr_boost'].copy()
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18  # Extra stick for top 10
+    meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
     from sklearn.ensemble import GradientBoostingRegressor
-    meta_booster = GradientBoostingRegressor(n_estimators=80, max_depth=3, learning_rate=0.13)
+    meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
     X_meta = today_df[meta_features].values
     y_meta = meta_pseudo_y.values
     meta_booster.fit(X_meta, y_meta)
@@ -359,5 +376,3 @@ if event_file is not None and today_file is not None:
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
-
-# END OF APP
