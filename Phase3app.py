@@ -6,7 +6,6 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
-from sklearn.inspection import permutation_importance
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
@@ -15,10 +14,10 @@ from betacal import BetaCalibration
 from sklearn.neighbors import LocalOutlierFactor
 import matplotlib.pyplot as plt
 
-st.set_page_config("🏆 MLB Home Run Predictor — Full Phase 1", layout="wide")
+st.set_page_config("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1", layout="wide")
 st.title("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1")
 
-# ================= BASE UTILITY FUNCTIONS ================
+# ================ BASE UTILITY FUNCTIONS ================
 @st.cache_data(show_spinner=False, max_entries=2)
 def safe_read_cached(path):
     fn = str(getattr(path, 'name', path)).lower()
@@ -147,33 +146,33 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
+# ========== PHASE 1: Plug-and-Play Enhancements ==========
 def label_smooth(y, smooth_amt=0.1):
-    # Soften 0 to 0.1, 1 to 0.9 (can tweak)
     return np.where(y == 1, 1 - smooth_amt, smooth_amt)
 
-def auto_feature_crosses(X, max_cross=24):
-    # Add top variance X*Y crosses (no memory bombs)
-    crosses = []
-    means = X.mean()
-    var_scores = {}
-    for i, f1 in enumerate(X.columns):
-        for j, f2 in enumerate(X.columns):
-            if i >= j: continue
-            cross = X[f1] * X[f2]
-            var_scores[(f1, f2)] = cross.var()
-    top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
-    for (f1, f2), _ in top_pairs:
-        name = f"{f1}*{f2}"
-        X[name] = X[f1] * X[f2]
-    return X
-
 def remove_outliers(X, y, method="iforest", contamination=0.012):
-    # Use IsolationForest (or LOF if you prefer)
     if method == "iforest":
         mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
     else:
         mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
     return X[mask], y[mask]
+
+# NEW: Robust, consistent feature crosses
+def get_top_cross_pairs(X, max_cross=24):
+    var_scores = {}
+    cols = X.columns
+    for i in range(len(cols)):
+        for j in range(i+1, len(cols)):
+            name = f"{cols[i]}*{cols[j]}"
+            var_scores[name] = (cols[i], cols[j], (X[cols[i]] * X[cols[j]]).var())
+    top_pairs = sorted(var_scores.values(), key=lambda x: -x[2])[:max_cross]
+    return [(a, b) for a, b, _ in top_pairs]
+
+def add_feature_crosses(X, cross_pairs):
+    for a, b in cross_pairs:
+        name = f"{a}*{b}"
+        X[name] = X[a] * X[b]
+    return X
 
 # ---- APP START ----
 
@@ -250,26 +249,25 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
+    # ===== PHASE 1: Consistent Feature Crosses =====
+    cross_pairs = get_top_cross_pairs(X, max_cross=24)
+    X = add_feature_crosses(X, cross_pairs)
+    X_today = add_feature_crosses(X_today, cross_pairs)
+    # Ensure all cross features exist in both X and X_today
+    missing_cols = [c for c in X.columns if c not in X_today.columns]
+    for c in missing_cols:
+        X_today[c] = 0
+    X_today = X_today[X.columns]
+    nan_inf_check(X, "X after crosses")
+    nan_inf_check(X_today, "X_today after crosses")
+
     # Outlier removal (train only)
     y = event_df[target_col].astype(int)
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
     st.write(f"Rows after outlier removal: {X.shape[0]}")
 
-    # === Cloud stability: Downsample training set if needed ===
-    max_train_rows = 15000
-    if X.shape[0] > max_train_rows:
-        st.warning(f"Sampling {max_train_rows} rows for training (cloud safe limit, original: {X.shape[0]} rows)")
-        _, X_sample, _, y_sample = train_test_split(
-            X, y, test_size=max_train_rows, random_state=42, stratify=y
-        )
-        X = X_sample.reset_index(drop=True)
-        y = y_sample.reset_index(drop=True)
-
-    # ===== PHASE 1: Feature Crosses & Outlier Removal =====
-    X = auto_feature_crosses(X, max_cross=24)
-    X_today = auto_feature_crosses(X_today, max_cross=24)
-    nan_inf_check(X, "X after crosses")
-    nan_inf_check(X_today, "X_today after crosses")
+    # ===== PHASE 1: Label Smoothing for Calibrators Only =====
+    y_smooth = label_smooth(y, smooth_amt=0.09)
 
     # ===== PHASE 1: Repeated Stratified KFold Bagging =====
     n_splits = 5
@@ -281,13 +279,11 @@ if event_file is not None and today_file is not None:
     scaler = StandardScaler()
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]  # HARD labels for classifiers
-
+        y_tr, y_va = y[tr_idx], y[va_idx]  # HARD labels for classifiers!
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
         X_today_scaled = sc.transform(X_today)
-
         xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
         lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
         cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
@@ -306,7 +302,6 @@ if event_file is not None and today_file is not None:
         ensemble.fit(X_tr_scaled, y_tr)
         val_preds[va_idx, fold] = ensemble.predict_proba(X_va_scaled)[:, 1]
         test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
-
     # Average bagged predictions
     y_val_bag = val_preds.mean(axis=1)
     y_today_bag = np.mean(np.column_stack(test_preds), axis=1)
@@ -314,15 +309,15 @@ if event_file is not None and today_file is not None:
     # ===== PHASE 1: BetaCalibration & Isotonic =====
     st.write("Calibrating probabilities (BetaCalibration & Isotonic)...")
     bc = BetaCalibration(parameters="abm")
-    bc.fit(y_val_bag.reshape(-1,1), y)
+    bc.fit(y_val_bag.reshape(-1,1), y_smooth)   # Use smooth labels for calibrator!
     y_val_beta = bc.predict(y_val_bag.reshape(-1,1))
     y_today_beta = bc.predict(y_today_bag.reshape(-1,1))
     ir = IsotonicRegression(out_of_bounds="clip")
-    y_val_iso = ir.fit_transform(y_val_bag, y)
+    y_val_iso = ir.fit_transform(y_val_bag, y_smooth)  # Use smooth labels for calibrator!
     y_today_iso = ir.transform(y_today_bag)
     # Use the best calibration (whichever has higher val logloss)
-    val_logloss_beta = log_loss(y, y_val_beta)
-    val_logloss_iso = log_loss(y, y_val_iso)
+    val_logloss_beta = log_loss(y_smooth, y_val_beta)
+    val_logloss_iso = log_loss(y_smooth, y_val_iso)
     if val_logloss_beta < val_logloss_iso:
         st.success(f"BetaCalibration used (logloss={val_logloss_beta:.4f})")
         hr_probs = y_today_beta
