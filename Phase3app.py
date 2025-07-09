@@ -1,25 +1,23 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, RepeatedStratifiedKFold
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, IsolationForest
+from sklearn.model_selection import RepeatedStratifiedKFold
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, log_loss
+from sklearn.metrics import log_loss
 from sklearn.preprocessing import StandardScaler
-from sklearn.inspection import permutation_importance
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
 from betacal import BetaCalibration
-from sklearn.neighbors import LocalOutlierFactor
+from sklearn.ensemble import IsolationForest
 import matplotlib.pyplot as plt
-import sklearn.utils
 
 st.set_page_config("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1", layout="wide")
 st.title("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1")
 
-# ================= BASE UTILITY FUNCTIONS ================
+# ========== BASE UTILS ==========
 @st.cache_data(show_spinner=False, max_entries=2)
 def safe_read_cached(path):
     fn = str(getattr(path, 'name', path)).lower()
@@ -148,42 +146,39 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
+# ========== CROSS FEATURES WITH SYNC ==========
 def auto_feature_crosses(X, max_cross=24, template_cols=None):
-    import itertools
-    crosses = []
+    # Generate top-variance cross features; can sync to template
+    cross_names = []
     if template_cols is not None:
+        # Just make the exact same crosses as before
         for name in template_cols:
             f1, f2 = name.split('*', 1)
-            X[name] = X[f1] * X[f2]
+            if f1 in X.columns and f2 in X.columns:
+                X[name] = X[f1] * X[f2]
+            else:
+                X[name] = 0.0  # dummy if missing
         return X, template_cols
     var_scores = {}
-    cols = list(X.columns)
+    cols = X.columns.tolist()
     for i, f1 in enumerate(cols):
-        for j in range(i+1, len(cols)):
-            f2 = cols[j]
+        for j, f2 in enumerate(cols):
+            if i >= j: continue
             cross = X[f1] * X[f2]
             var_scores[(f1, f2)] = cross.var()
     top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
-    cross_names = []
-    cross_frames = []
     for (f1, f2), _ in top_pairs:
         name = f"{f1}*{f2}"
+        X[name] = X[f1] * X[f2]
         cross_names.append(name)
-        cross_frames.append((X[f1] * X[f2]).rename(name))
-    if cross_frames:
-        X = pd.concat([X] + cross_frames, axis=1)
     st.write("Cross features created:", cross_names)
     return X, cross_names
 
 def remove_outliers(X, y, method="iforest", contamination=0.012):
-    if method == "iforest":
-        mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
-    else:
-        mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
+    mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
     return X[mask], y[mask]
 
-# ---- APP START ----
-
+# ========== APP ==========
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
@@ -246,83 +241,82 @@ if event_file is not None and today_file is not None:
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
 
-    # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
-    max_feats = 200
-    variances = X.var().sort_values(ascending=False)
-    top_feat_names = variances.head(max_feats).index.tolist()
-    X = X[top_feat_names]
-    X_today = X_today[top_feat_names]
-    st.success(f"Final number of features after auto-filtering: {X.shape[1]}")
-
-    nan_inf_check(X, "X features")
-    nan_inf_check(X_today, "X_today features")
-
     # ===== PHASE 1: Feature Crosses & Outlier Removal (sync crosses!) =====
     X, cross_names = auto_feature_crosses(X, max_cross=24)
     X_today, _ = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
     st.write(f"After cross sync: X cols {X.shape[1]}, X_today cols {X_today.shape[1]}")
+    nan_inf_check(X, "X after crosses")
+    nan_inf_check(X_today, "X_today after crosses")
 
     # Outlier removal (train only)
     y = event_df[target_col].astype(int)
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
     X = X.reset_index(drop=True)
     y = pd.Series(y).reset_index(drop=True)
-
     st.write(f"Rows after outlier removal: {X.shape[0]}")
     st.write(f"X index: {X.index.min()}-{X.index.max()}, y index: {y.index.min()}-{y.index.max()}, X shape: {X.shape}, y shape: {y.shape}")
 
-    # ========== Limit rows for Streamlit Cloud ==========
-    MAX_TRAIN_ROWS = 20000  # increase only if needed and memory allows
-    if X.shape[0] > MAX_TRAIN_ROWS:
-        X, y = sklearn.utils.resample(X, y, n_samples=MAX_TRAIN_ROWS, stratify=y, random_state=42)
-        X = X.reset_index(drop=True)
-        y = pd.Series(y).reset_index(drop=True)
-        st.warning(f"Training limited to {MAX_TRAIN_ROWS} rows for memory (full dataset was {X.shape[0]} rows).")
+    # ===== Limit training rows for memory =====
+    max_train_rows = 20000
+    if X.shape[0] > max_train_rows:
+        st.warning(f"Training limited to {max_train_rows} rows for memory (full dataset was {X.shape[0]} rows).")
+        sampled_idx = np.random.RandomState(42).choice(X.index, max_train_rows, replace=False)
+        X = X.loc[sampled_idx].reset_index(drop=True)
+        y = y.loc[sampled_idx].reset_index(drop=True)
 
     st.write(f"Preparing KFold splits: X {X.shape}, y {y.shape}, X_today {X_today.shape}")
 
-    # ===== PHASE 1: Repeated Stratified KFold Bagging =====
+    # ===== PHASE 1: Repeated Stratified KFold Bagging (with debug) =====
     n_splits = 5
     n_repeats = 3
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
-    y = y.astype(int)  # classifiers want 0/1
-
     val_preds = np.zeros((len(y), n_repeats * n_splits))
     test_preds = []
     scaler = StandardScaler()
     fold_id = 0
 
     for tr_idx, va_idx in rskf.split(X, y):
-        X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
-        sc = scaler.fit(X_tr)
-        X_tr_scaled = sc.transform(X_tr)
-        X_va_scaled = sc.transform(X_va)
-        # -- Fit scaler on train, apply to today (ensure matching cols)
-        X_today_scaled = sc.transform(X_today[X.columns])
-
-        xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
-        lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
-        cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
-        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
-        gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
-        lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-        models_for_ensemble = [
-            ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
-        ]
-        ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-        for name, model in models_for_ensemble:
-            try:
-                model.fit(X_tr_scaled, y_tr)
-            except Exception as e:
-                st.warning(f"{name} training failed in fold: {e}")
         try:
-            ensemble.fit(X_tr_scaled, y_tr)
-            val_preds[va_idx, fold_id] = ensemble.predict_proba(X_va_scaled)[:, 1]
-            test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
-        except Exception as e:
-            st.warning(f"Ensemble training failed in fold: {e}")
+            X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
+            y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
+
+            if not (X_tr.columns.equals(X_va.columns) and X_tr.columns.equals(X_today.columns)):
+                st.error(f"Feature mismatch in fold {fold_id}!\nX_tr cols: {X_tr.columns[:5]},\nX_today cols: {X_today.columns[:5]}")
+                continue
+
+            sc = scaler.fit(X_tr)
+            X_tr_scaled = sc.transform(X_tr)
+            X_va_scaled = sc.transform(X_va)
+            X_today_scaled = sc.transform(X_today[X_tr.columns])
+
+            xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
+            lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
+            cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
+            rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
+            gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
+            lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+            models_for_ensemble = [
+                ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
+            ]
+            ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+            for name, model in models_for_ensemble:
+                try:
+                    model.fit(X_tr_scaled, y_tr)
+                except Exception as e:
+                    st.warning(f"{name} training failed in fold {fold_id}: {e}")
+            try:
+                ensemble.fit(X_tr_scaled, y_tr)
+                val_preds[va_idx, fold_id] = ensemble.predict_proba(X_va_scaled)[:, 1]
+                test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
+            except Exception as e:
+                st.warning(f"Ensemble fit/predict failed in fold {fold_id}: {e}")
+        except Exception as err:
+            st.error(f"Fold {fold_id} crashed with error: {err}")
         fold_id += 1
+
+    if len(test_preds) == 0:
+        st.error("All bagging folds failed—please check logs above for root cause (likely a feature mismatch or a memory blowup).")
+        st.stop()
 
     # Average bagged predictions
     y_val_bag = val_preds.mean(axis=1)
@@ -337,6 +331,7 @@ if event_file is not None and today_file is not None:
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_iso = ir.fit_transform(y_val_bag, y)
     y_today_iso = ir.transform(y_today_bag)
+
     val_logloss_beta = log_loss(y, y_val_beta)
     val_logloss_iso = log_loss(y, y_val_iso)
     if val_logloss_beta < val_logloss_iso:
@@ -358,7 +353,7 @@ if event_file is not None and today_file is not None:
     today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
     today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
     meta_pseudo_y = today_df['sticky_hr_boost'].copy()
-    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18  # Extra stick for top 10
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18
     meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
     from sklearn.ensemble import GradientBoostingRegressor
     meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
@@ -401,12 +396,14 @@ if event_file is not None and today_file is not None:
         file_name=f"top{top_n}_leaderboard.csv"
     )
 
+    # Download full predictions (with diagnostics)
     st.download_button(
         "⬇️ Download Full Prediction CSV",
         data=today_df.to_csv(index=False),
         file_name="today_hr_predictions_full.csv"
     )
 
+    # HR Probability Distribution (Top 30)
     if "player_name" in leaderboard_top.columns:
         st.subheader("📊 HR Probability Distribution (Top 30)")
         fig, ax = plt.subplots(figsize=(10, 7))
@@ -416,6 +413,7 @@ if event_file is not None and today_file is not None:
         ax.set_ylabel('Player')
         st.pyplot(fig)
 
+    # Meta-Ranker Feature Importance
     st.subheader("🔎 Meta-Ranker Feature Importance")
     importances = pd.Series(meta_booster.feature_importances_, index=meta_features)
     st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
@@ -425,10 +423,7 @@ if event_file is not None and today_file is not None:
     if (leaderboard_top[sort_col] < 0).any() or (leaderboard_top[sort_col] > 1).any():
         st.warning("⚠️ Some final probabilities are out of [0,1] range!")
 
-    if "drifted" in locals() and drifted:
-        st.markdown("#### ⚡ **Feature Drift Diagnostics**")
-        st.write("These features have unusual mean/std changes between training and today, check if input context shifted:", drifted)
-
+    # Extra: Show prediction histogram (full today set)
     st.subheader("Prediction Probability Distribution (all predictions)")
     plt.figure(figsize=(8, 3))
     plt.hist(today_df[sort_col], bins=30, color='orange', alpha=0.7)
@@ -436,6 +431,5 @@ if event_file is not None and today_file is not None:
     plt.ylabel("Count")
     st.pyplot(plt.gcf())
     plt.close()
-
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
