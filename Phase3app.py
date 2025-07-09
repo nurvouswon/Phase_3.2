@@ -260,6 +260,10 @@ if event_file is not None and today_file is not None:
     # ===== PHASE 1: Feature Crosses & Outlier Removal (sync crosses!) =====
     X, cross_names = auto_feature_crosses(X, max_cross=24)
     X_today = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
+
+    # 🔒 LOCK COLUMNS — force identical columns and order, fill missing with 0
+    X_today = X_today.reindex(columns=X.columns, fill_value=0)
+
     nan_inf_check(X, "X after crosses")
     nan_inf_check(X_today, "X_today after crosses")
 
@@ -271,7 +275,6 @@ if event_file is not None and today_file is not None:
     y = pd.Series(y).reset_index(drop=True)
 
     st.write(f"Rows after outlier removal: {X.shape[0]}")
-
     # ===== PHASE 1: Label Smoothing =====
     # We use hard labels for the actual model, but you can optionally use y_smooth for stacking, meta, etc.
     y_smooth = label_smooth(y, smooth_amt=0.09)
