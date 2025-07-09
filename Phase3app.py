@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, RepeatedStratifiedKFold
+from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, IsolationForest
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, log_loss
+from sklearn.metrics import log_loss
 from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import lightgbm as lgb
@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 st.set_page_config("🏆 MLB Home Run Predictor — Full Phase 1", layout="wide")
 st.title("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1")
 
+# ================= BASE UTILITY FUNCTIONS ================
 @st.cache_data(show_spinner=False, max_entries=2)
 def safe_read_cached(path):
     fn = str(getattr(path, 'name', path)).lower()
@@ -129,7 +130,7 @@ def drift_check(train, today, n=5):
     return drifted
 
 def winsorize_clip(X, limits=(0.01, 0.99)):
-    X = X.astype(float)  # <-- fixes masked int bug
+    X = X.astype(float)
     for col in X.columns:
         lower = X[col].quantile(limits[0])
         upper = X[col].quantile(limits[1])
@@ -145,13 +146,14 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
-# PHASE 1: Plug-and-Play Enhancements
-
-def label_smooth(y, smooth_amt=0.09):
+def label_smooth(y, smooth_amt=0.1):
+    # Soften 0 to 0.1, 1 to 0.9 (can tweak)
     return np.where(y == 1, 1 - smooth_amt, smooth_amt)
 
 def auto_feature_crosses(X, max_cross=24):
-    # Compute cross features ONLY on train X and return their pairs/names
+    # Add top variance X*Y crosses (no memory bombs)
+    crosses = []
+    means = X.mean()
     var_scores = {}
     for i, f1 in enumerate(X.columns):
         for j, f2 in enumerate(X.columns):
@@ -159,15 +161,8 @@ def auto_feature_crosses(X, max_cross=24):
             cross = X[f1] * X[f2]
             var_scores[(f1, f2)] = cross.var()
     top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
-    cross_names = []
     for (f1, f2), _ in top_pairs:
         name = f"{f1}*{f2}"
-        X[name] = X[f1] * X[f2]
-        cross_names.append((f1, f2, name))
-    return X, cross_names
-
-def apply_crosses(X, cross_names):
-    for f1, f2, name in cross_names:
         X[name] = X[f1] * X[f2]
     return X
 
@@ -211,6 +206,7 @@ if event_file is not None and today_file is not None:
         st.stop()
     st.success("✅ 'hr_outcome' column found in event-level data.")
 
+    # ---- Feature Filtering ----
     feature_cols = sorted(list(set(get_valid_feature_cols(event_df)) & set(get_valid_feature_cols(today_df))))
     st.write(f"Feature count before filtering: {len(feature_cols)}")
     X = clean_X(event_df[feature_cols])
@@ -253,19 +249,23 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    # ===== PHASE 1: Feature Crosses & Outlier Removal (NEW LOGIC) =====
-    X, cross_names = auto_feature_crosses(X, max_cross=24)
-    X_today = apply_crosses(X_today, cross_names)
+    # ===== PHASE 1: Feature Crosses & Outlier Removal =====
+    X = auto_feature_crosses(X, max_cross=24)
+    X_today = auto_feature_crosses(X_today, max_cross=24)
     nan_inf_check(X, "X after crosses")
     nan_inf_check(X_today, "X_today after crosses")
-
     # Outlier removal (train only)
     y = event_df[target_col].astype(int)
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
     st.write(f"Rows after outlier removal: {X.shape[0]}")
 
-    # ===== PHASE 1: Label Smoothing (TRAIN ONLY for calibration, not classifiers) =====
-    y_smooth = label_smooth(y, smooth_amt=0.09)
+    # ============ PATCH: LIMIT TRAINING SIZE FOR CLOUD ==============
+    max_train_rows = 20000
+    if X.shape[0] > max_train_rows:
+        st.warning(f"Sampling {max_train_rows} rows for training (Streamlit Cloud limit).")
+        sampled_idx = np.random.choice(X.index, size=max_train_rows, replace=False)
+        X = X.loc[sampled_idx]
+        y = y.loc[sampled_idx]
 
     # ===== PHASE 1: Repeated Stratified KFold Bagging =====
     n_splits = 5
@@ -277,7 +277,7 @@ if event_file is not None and today_file is not None:
     scaler = StandardScaler()
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]  # HARD labels for classifiers!
+        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
@@ -307,15 +307,14 @@ if event_file is not None and today_file is not None:
     # ===== PHASE 1: BetaCalibration & Isotonic =====
     st.write("Calibrating probabilities (BetaCalibration & Isotonic)...")
     bc = BetaCalibration(parameters="abm")
-    bc.fit(y_val_bag.reshape(-1,1), y_smooth)
+    bc.fit(y_val_bag.reshape(-1,1), y)
     y_val_beta = bc.predict(y_val_bag.reshape(-1,1))
     y_today_beta = bc.predict(y_today_bag.reshape(-1,1))
     ir = IsotonicRegression(out_of_bounds="clip")
-    y_val_iso = ir.fit_transform(y_val_bag, y_smooth)
+    y_val_iso = ir.fit_transform(y_val_bag, y)
     y_today_iso = ir.transform(y_today_bag)
-    # Use the best calibration (whichever has higher val logloss)
-    val_logloss_beta = log_loss(y_smooth, y_val_beta)
-    val_logloss_iso = log_loss(y_smooth, y_val_iso)
+    val_logloss_beta = log_loss(y, y_val_beta)
+    val_logloss_iso = log_loss(y, y_val_iso)
     if val_logloss_beta < val_logloss_iso:
         st.success(f"BetaCalibration used (logloss={val_logloss_beta:.4f})")
         hr_probs = y_today_beta
@@ -400,6 +399,7 @@ if event_file is not None and today_file is not None:
     importances = pd.Series(meta_booster.feature_importances_, index=meta_features)
     st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
 
+    # Quick check for any NaNs or impossible values in leaderboard
     if leaderboard_top.isna().any().any():
         st.warning("⚠️ NaNs detected in leaderboard! Double-check the input features.")
     if (leaderboard_top[sort_col] < 0).any() or (leaderboard_top[sort_col] > 1).any():
