@@ -148,9 +148,27 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
     return stick
 
 def label_smooth(y, smooth_amt=0.1):
+    # Soften 0 to 0.1, 1 to 0.9 (can tweak)
     return np.where(y == 1, 1 - smooth_amt, smooth_amt)
 
+def auto_feature_crosses(X, max_cross=24):
+    # Add top variance X*Y crosses (no memory bombs)
+    crosses = []
+    means = X.mean()
+    var_scores = {}
+    for i, f1 in enumerate(X.columns):
+        for j, f2 in enumerate(X.columns):
+            if i >= j: continue
+            cross = X[f1] * X[f2]
+            var_scores[(f1, f2)] = cross.var()
+    top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
+    for (f1, f2), _ in top_pairs:
+        name = f"{f1}*{f2}"
+        X[name] = X[f1] * X[f2]
+    return X
+
 def remove_outliers(X, y, method="iforest", contamination=0.012):
+    # Use IsolationForest (or LOF if you prefer)
     if method == "iforest":
         mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
     else:
@@ -221,49 +239,37 @@ if event_file is not None and today_file is not None:
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
 
-    # ======= LIMIT TO 200 FEATURES BY VARIANCE (before crosses) =======
+    # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
     max_feats = 200
     variances = X.var().sort_values(ascending=False)
     top_feat_names = variances.head(max_feats).index.tolist()
-    X = X[top_feat_names].copy()
-    X_today = X_today[top_feat_names].copy()
+    X = X[top_feat_names]
+    X_today = X_today[top_feat_names]
     st.success(f"Final number of features after auto-filtering: {X.shape[1]}")
 
-    nan_inf_check(X, "X features (pre-crosses)")
-    nan_inf_check(X_today, "X_today features (pre-crosses)")
-
-    # ===== PHASE 1: Feature Crosses — MATCHED! =====
-    # 1. Make ALL possible crosses in both train and today, then select top N crosses by variance from TRAIN only
-    def all_crosses(X):
-        crosses = {}
-        cols = X.columns
-        for i, f1 in enumerate(cols):
-            for j in range(i+1, len(cols)):
-                f2 = cols[j]
-                name = f"{f1}*{f2}"
-                crosses[name] = X[f1] * X[f2]
-        return pd.DataFrame(crosses, index=X.index)
-
-    crosses_X = all_crosses(X)
-    crosses_today = all_crosses(X_today)
-
-    if len(crosses_X.columns) > 0:
-        cross_vars = crosses_X.var().sort_values(ascending=False)
-        top_crosses = cross_vars.head(24).index.tolist()
-        X = pd.concat([X, crosses_X[top_crosses]], axis=1)
-        X_today = pd.concat([X_today, crosses_today[top_crosses]], axis=1)
-
-    nan_inf_check(X, "X after crosses")
-    nan_inf_check(X_today, "X_today after crosses")
+    nan_inf_check(X, "X features")
+    nan_inf_check(X_today, "X_today features")
 
     # Outlier removal (train only)
     y = event_df[target_col].astype(int)
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
     st.write(f"Rows after outlier removal: {X.shape[0]}")
 
-    # ===== PHASE 1: Label Smoothing =====
-    # (Apply to OOF for calibration only; not used for classifier targets)
-    y_smooth = label_smooth(y, smooth_amt=0.09)
+    # === Cloud stability: Downsample training set if needed ===
+    max_train_rows = 15000
+    if X.shape[0] > max_train_rows:
+        st.warning(f"Sampling {max_train_rows} rows for training (cloud safe limit, original: {X.shape[0]} rows)")
+        _, X_sample, _, y_sample = train_test_split(
+            X, y, test_size=max_train_rows, random_state=42, stratify=y
+        )
+        X = X_sample.reset_index(drop=True)
+        y = y_sample.reset_index(drop=True)
+
+    # ===== PHASE 1: Feature Crosses & Outlier Removal =====
+    X = auto_feature_crosses(X, max_cross=24)
+    X_today = auto_feature_crosses(X_today, max_cross=24)
+    nan_inf_check(X, "X after crosses")
+    nan_inf_check(X_today, "X_today after crosses")
 
     # ===== PHASE 1: Repeated Stratified KFold Bagging =====
     n_splits = 5
@@ -276,10 +282,12 @@ if event_file is not None and today_file is not None:
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
         y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]  # HARD labels for classifiers
+
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
         X_today_scaled = sc.transform(X_today)
+
         xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
         lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
         cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
@@ -312,6 +320,7 @@ if event_file is not None and today_file is not None:
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_iso = ir.fit_transform(y_val_bag, y)
     y_today_iso = ir.transform(y_today_bag)
+    # Use the best calibration (whichever has higher val logloss)
     val_logloss_beta = log_loss(y, y_val_beta)
     val_logloss_iso = log_loss(y, y_val_iso)
     if val_logloss_beta < val_logloss_iso:
@@ -404,7 +413,8 @@ if event_file is not None and today_file is not None:
         st.warning("⚠️ Some final probabilities are out of [0,1] range!")
 
     # Display drifted features if any
-    if 'drifted' in locals() and drifted:
+    drifted = drift_check(X, X_today, n=6)
+    if drifted:
         st.markdown("#### ⚡ **Feature Drift Diagnostics**")
         st.write("These features have unusual mean/std changes between training and today, check if input context shifted:", drifted)
 
