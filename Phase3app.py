@@ -272,14 +272,14 @@ if event_file is not None and today_file is not None:
     st.write(f"X index: {X.index.min()}-{X.index.max()}, y index: {y.index.min()}-{y.index.max()}, X shape: {X.shape}, y shape: {y.shape}")
 
     # ===== Sampling for Streamlit Cloud =====
-    if X.shape[0] > 10000:
-        st.warning(f"Training limited to 10000 rows for memory (full dataset was {X.shape[0]} rows).")
-        X = X.iloc[:10000].copy()
-        y = y.iloc[:10000].copy()
+    if X.shape[0] > 15000:
+        st.warning(f"Training limited to 15000 rows for memory (full dataset was {X.shape[0]} rows).")
+        X = X.iloc[:15000].copy()
+        y = y.iloc[:15000].copy()
 
     # ---- KFold Setup ----
-    n_splits = 5
-    n_repeats = 3
+    n_splits = 3
+    n_repeats = 2
     st.write(f"Preparing KFold splits: X {X.shape}, y {y.shape}, X_today {X_today.shape}")
 
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
