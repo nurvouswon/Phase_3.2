@@ -149,25 +149,34 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
 def label_smooth(y, smooth_amt=0.09):
     return np.where(y == 1, 1 - smooth_amt, smooth_amt)
 
-def auto_feature_crosses(X, max_cross=24, template_cols=None):
-    crosses = []
-    var_scores = {}
-    cols = list(X.columns)
-    for i, f1 in enumerate(cols):
-        for j, f2 in enumerate(cols):
-            if i >= j: continue
-            cross = X[f1] * X[f2]
-            var_scores[(f1, f2)] = cross.var()
-    top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
+def auto_feature_crosses(X, max_cross=20, template_cols=None):
     cross_names = []
     if template_cols is not None:
         # If template provided, always create these
-        top_pairs = [tuple(n.split('*')) for n in template_cols]
-    for (f1, f2), _ in top_pairs:
-        name = f"{f1}*{f2}"
-        X[name] = X[f1] * X[f2]
-        cross_names.append(name)
-    return X, cross_names
+        for name in template_cols:
+            # Split into the two original column names
+            if '*' not in name:
+                continue
+            f1, f2 = name.split('*', 1)
+            # Only create if both columns exist in X
+            if f1 in X.columns and f2 in X.columns:
+                X[name] = X[f1] * X[f2]
+                cross_names.append(name)
+        return X, cross_names
+    else:
+        # Build top variance crosses
+        var_scores = {}
+        for i, f1 in enumerate(X.columns):
+            for j, f2 in enumerate(X.columns):
+                if i >= j: continue
+                cross = X[f1] * X[f2]
+                var_scores[(f1, f2)] = cross.var()
+        top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
+        for (f1, f2), _ in top_pairs:
+            name = f"{f1}*{f2}"
+            X[name] = X[f1] * X[f2]
+            cross_names.append(name)
+        return X, cross_names
 
 def remove_outliers(X, y, method="iforest", contamination=0.012):
     if method == "iforest":
