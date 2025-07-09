@@ -270,7 +270,7 @@ if event_file is not None and today_file is not None:
     scaler = StandardScaler()
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-        y_tr, y_va = y[tr_idx], y[va_idx]  # HARD labels for classifiers
+        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]  # RIGHT: always uses position
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
