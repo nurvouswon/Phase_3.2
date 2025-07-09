@@ -6,17 +6,20 @@ from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientB
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
+from sklearn.inspection import permutation_importance
 import xgboost as xgb
 import lightgbm as lgb
 import catboost as cb
 from sklearn.isotonic import IsotonicRegression
 from betacal import BetaCalibration
+from sklearn.neighbors import LocalOutlierFactor
 import matplotlib.pyplot as plt
+import sklearn.utils
 
 st.set_page_config("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1", layout="wide")
 st.title("🏆 MLB Home Run Predictor — State of the Art, Full Phase 1")
 
-# Utility functions (unchanged)
+# ================= BASE UTILITY FUNCTIONS ================
 @st.cache_data(show_spinner=False, max_entries=2)
 def safe_read_cached(path):
     fn = str(getattr(path, 'name', path)).lower()
@@ -27,14 +30,21 @@ def safe_read_cached(path):
     except UnicodeDecodeError:
         return pd.read_csv(path, encoding='latin1', low_memory=False)
 
-def dedup_columns(df): return df.loc[:, ~df.columns.duplicated()]
-def find_duplicate_columns(df): return [col for col in df.columns if list(df.columns).count(col) > 1]
+def dedup_columns(df):
+    return df.loc[:, ~df.columns.duplicated()]
+
+def find_duplicate_columns(df):
+    return [col for col in df.columns if list(df.columns).count(col) > 1]
+
 def fix_types(df):
     for col in df.columns:
-        if df[col].isnull().all(): continue
+        if df[col].isnull().all():
+            continue
         if df[col].dtype == 'O':
-            try: df[col] = pd.to_numeric(df[col], errors='ignore')
-            except Exception: pass
+            try:
+                df[col] = pd.to_numeric(df[col], errors='ignore')
+            except Exception:
+                pass
         if pd.api.types.is_float_dtype(df[col]) and (df[col].dropna() % 1 == 0).all():
             df[col] = df[col].astype(pd.Int64Dtype())
     return df
@@ -80,47 +90,6 @@ def feature_debug(X):
             st.write(f"Column {col} is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
-def winsorize_clip(X, limits=(0.01, 0.99)):
-    X = X.astype(float)
-    for col in X.columns:
-        lower = X[col].quantile(limits[0])
-        upper = X[col].quantile(limits[1])
-        X[col] = X[col].clip(lower=lower, upper=upper)
-    return X
-
-# Feature crossing (with sync mode)
-def auto_feature_crosses(X, max_cross=20, template_cols=None):
-    if template_cols is not None:
-        # Template mode: just add missing cross cols, preserve order
-        for col in template_cols:
-            if col not in X.columns:
-                X[col] = 0
-        X = X.reindex(columns=template_cols)
-        return X
-    crosses = []
-    means = X.mean()
-    var_scores = {}
-    for i, f1 in enumerate(X.columns):
-        for j, f2 in enumerate(X.columns):
-            if i >= j: continue
-            cross = X[f1] * X[f2]
-            var_scores[(f1, f2)] = cross.var()
-    top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
-    cross_names = []
-    for (f1, f2), _ in top_pairs:
-        name = f"{f1}*{f2}"
-        X[name] = X[f1] * X[f2]
-        cross_names.append(name)
-    return X, cross_names
-
-def remove_outliers(X, y, method="iforest", contamination=0.012):
-    if method == "iforest":
-        mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
-    else:
-        from sklearn.neighbors import LocalOutlierFactor
-        mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
-    return X[mask], np.array(y)[mask]
-
 def overlay_multiplier(row):
     multiplier = 1.0
     wind_col = 'wind_mph'
@@ -129,8 +98,10 @@ def overlay_multiplier(row):
         wind = row[wind_col]
         wind_dir = str(row[wind_dir_col]).lower()
         if pd.notnull(wind) and wind >= 10:
-            if 'out' in wind_dir: multiplier *= 1.08
-            elif 'in' in wind_dir: multiplier *= 0.93
+            if 'out' in wind_dir:
+                multiplier *= 1.08
+            elif 'in' in wind_dir:
+                multiplier *= 0.93
     temp_col = 'temp'
     if temp_col in row and pd.notnull(row[temp_col]):
         base_temp = 70
@@ -139,8 +110,10 @@ def overlay_multiplier(row):
     humidity_col = 'humidity'
     if humidity_col in row and pd.notnull(row[humidity_col]):
         hum = row[humidity_col]
-        if hum > 60: multiplier *= 1.02
-        elif hum < 40: multiplier *= 0.98
+        if hum > 60:
+            multiplier *= 1.02
+        elif hum < 40:
+            multiplier *= 0.98
     park_hr_col = 'park_hr_rate'
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.85, min(1.20, float(row[park_hr_col])))
@@ -158,6 +131,14 @@ def drift_check(train, today, n=5):
             drifted.append(c)
     return drifted
 
+def winsorize_clip(X, limits=(0.01, 0.99)):
+    X = X.astype(float)
+    for col in X.columns:
+        lower = X[col].quantile(limits[0])
+        upper = X[col].quantile(limits[1])
+        X[col] = X[col].clip(lower=lower, upper=upper)
+    return X
+
 def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=None, hr_col='hr_probability'):
     stick = df[hr_col].copy()
     if prev_rank_col and prev_rank_col in df.columns:
@@ -167,8 +148,39 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
-def label_smooth(y, smooth_amt=0.1):
-    return np.where(y == 1, 1 - smooth_amt, smooth_amt)
+def auto_feature_crosses(X, max_cross=24, template_cols=None):
+    import itertools
+    crosses = []
+    if template_cols is not None:
+        for name in template_cols:
+            f1, f2 = name.split('*', 1)
+            X[name] = X[f1] * X[f2]
+        return X, template_cols
+    var_scores = {}
+    cols = list(X.columns)
+    for i, f1 in enumerate(cols):
+        for j in range(i+1, len(cols)):
+            f2 = cols[j]
+            cross = X[f1] * X[f2]
+            var_scores[(f1, f2)] = cross.var()
+    top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
+    cross_names = []
+    cross_frames = []
+    for (f1, f2), _ in top_pairs:
+        name = f"{f1}*{f2}"
+        cross_names.append(name)
+        cross_frames.append((X[f1] * X[f2]).rename(name))
+    if cross_frames:
+        X = pd.concat([X] + cross_frames, axis=1)
+    st.write("Cross features created:", cross_names)
+    return X, cross_names
+
+def remove_outliers(X, y, method="iforest", contamination=0.012):
+    if method == "iforest":
+        mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
+    else:
+        mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
+    return X[mask], y[mask]
 
 # ---- APP START ----
 
@@ -234,222 +246,196 @@ if event_file is not None and today_file is not None:
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
 
-    # ===== PHASE 1: Feature Crosses & Outlier Removal (diagnostics!) =====
-    try:
-        X, cross_names = auto_feature_crosses(X, max_cross=24)
-        X_today = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
-        st.write(f"Cross features created: {cross_names}")
-        # 🔒 Force columns identical (sync order and missing)
-        X_today = X_today.reindex(columns=X.columns, fill_value=0)
-        # Check after
-        st.write(f"After cross sync: X cols {len(X.columns)}, X_today cols {len(X_today.columns)}")
-        if list(X.columns) != list(X_today.columns):
-            st.error("Feature cross column mismatch after sync!")
-            st.write("X columns:", list(X.columns))
-            st.write("X_today columns:", list(X_today.columns))
-            st.stop()
-    except Exception as e:
-        st.error(f"Crash during feature crossing! Error: {e}")
-        st.write("X cols:", list(X.columns))
-        st.write("X_today cols:", list(X_today.columns))
-        st.stop()
+    # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
+    max_feats = 200
+    variances = X.var().sort_values(ascending=False)
+    top_feat_names = variances.head(max_feats).index.tolist()
+    X = X[top_feat_names]
+    X_today = X_today[top_feat_names]
+    st.success(f"Final number of features after auto-filtering: {X.shape[1]}")
 
-    nan_inf_check(X, "X after crosses")
-    nan_inf_check(X_today, "X_today after crosses")
+    nan_inf_check(X, "X features")
+    nan_inf_check(X_today, "X_today features")
+
+    # ===== PHASE 1: Feature Crosses & Outlier Removal (sync crosses!) =====
+    X, cross_names = auto_feature_crosses(X, max_cross=24)
+    X_today, _ = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
+    st.write(f"After cross sync: X cols {X.shape[1]}, X_today cols {X_today.shape[1]}")
 
     # Outlier removal (train only)
-    try:
-        y = event_df[target_col].astype(int)
-        X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
+    y = event_df[target_col].astype(int)
+    X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
+    X = X.reset_index(drop=True)
+    y = pd.Series(y).reset_index(drop=True)
+
+    st.write(f"Rows after outlier removal: {X.shape[0]}")
+    st.write(f"X index: {X.index.min()}-{X.index.max()}, y index: {y.index.min()}-{y.index.max()}, X shape: {X.shape}, y shape: {y.shape}")
+
+    # ========== Limit rows for Streamlit Cloud ==========
+    MAX_TRAIN_ROWS = 20000  # increase only if needed and memory allows
+    if X.shape[0] > MAX_TRAIN_ROWS:
+        X, y = sklearn.utils.resample(X, y, n_samples=MAX_TRAIN_ROWS, stratify=y, random_state=42)
         X = X.reset_index(drop=True)
         y = pd.Series(y).reset_index(drop=True)
-        st.write(f"Rows after outlier removal: {X.shape[0]}")
-        st.write(f"X index: {X.index.min()}-{X.index.max()}, y index: {y.index.min()}-{y.index.max()}, X shape: {X.shape}, y shape: {y.shape}")
-    except Exception as e:
-        st.error(f"Crash during outlier removal! Error: {e}")
-        st.write("X shape:", X.shape)
-        st.write("y shape:", len(y))
-        st.stop()
+        st.warning(f"Training limited to {MAX_TRAIN_ROWS} rows for memory (full dataset was {X.shape[0]} rows).")
 
-    # =========== Split & Scale ===========
-    try:
-        n_splits = 5
-        n_repeats = 3
-        rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
-        y_oof = np.zeros_like(y, dtype=float)
-        val_preds = np.zeros((len(y), n_repeats * n_splits))
-        test_preds = []
-        scaler = StandardScaler()
-        st.write(f"Preparing KFold splits: X {X.shape}, y {y.shape}, X_today {X_today.shape}")
-        for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
-            X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-            y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
-            sc = scaler.fit(X_tr)
-            X_tr_scaled = sc.transform(X_tr)
-            X_va_scaled = sc.transform(X_va)
-            X_today_scaled = sc.transform(X_today)
-            xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
-            lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
-            cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
-            rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
-            gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
-            lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-            models_for_ensemble = [
-                ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
-            ]
-            ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-            for name, model in models_for_ensemble:
-                try:
-                    model.fit(X_tr_scaled, y_tr)
-                except Exception as e:
-                    st.warning(f"{name} training failed in fold: {e}")
+    st.write(f"Preparing KFold splits: X {X.shape}, y {y.shape}, X_today {X_today.shape}")
+
+    # ===== PHASE 1: Repeated Stratified KFold Bagging =====
+    n_splits = 5
+    n_repeats = 3
+    rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
+    y = y.astype(int)  # classifiers want 0/1
+
+    val_preds = np.zeros((len(y), n_repeats * n_splits))
+    test_preds = []
+    scaler = StandardScaler()
+    fold_id = 0
+
+    for tr_idx, va_idx in rskf.split(X, y):
+        X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
+        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
+        sc = scaler.fit(X_tr)
+        X_tr_scaled = sc.transform(X_tr)
+        X_va_scaled = sc.transform(X_va)
+        # -- Fit scaler on train, apply to today (ensure matching cols)
+        X_today_scaled = sc.transform(X_today[X.columns])
+
+        xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
+        lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
+        cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
+        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
+        gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
+        lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+        models_for_ensemble = [
+            ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
+        ]
+        ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
+        for name, model in models_for_ensemble:
+            try:
+                model.fit(X_tr_scaled, y_tr)
+            except Exception as e:
+                st.warning(f"{name} training failed in fold: {e}")
+        try:
             ensemble.fit(X_tr_scaled, y_tr)
-            val_preds[va_idx, fold] = ensemble.predict_proba(X_va_scaled)[:, 1]
+            val_preds[va_idx, fold_id] = ensemble.predict_proba(X_va_scaled)[:, 1]
             test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
-        st.write("Completed bagged model training.")
-    except Exception as e:
-        st.error(f"Crash during KFold/model training! Error: {e}")
-        st.write(f"X shape: {X.shape}, y shape: {y.shape}, X_today shape: {X_today.shape}")
-        st.stop()
+        except Exception as e:
+            st.warning(f"Ensemble training failed in fold: {e}")
+        fold_id += 1
 
-    # ===== PHASE 1: Calibration (BetaCalibration & Isotonic, diagnostics) =====
-    try:
-        y_val_bag = val_preds.mean(axis=1)
-        y_today_bag = np.mean(np.column_stack(test_preds), axis=1)
-        st.write("Calibrating probabilities with BetaCalibration and Isotonic...")
+    # Average bagged predictions
+    y_val_bag = val_preds.mean(axis=1)
+    y_today_bag = np.mean(np.column_stack(test_preds), axis=1)
 
-        bc = BetaCalibration(parameters="abm")
-        bc.fit(y_val_bag.reshape(-1,1), y)
-        y_val_beta = bc.predict(y_val_bag.reshape(-1,1))
-        y_today_beta = bc.predict(y_today_bag.reshape(-1,1))
+    # ===== PHASE 1: BetaCalibration & Isotonic =====
+    st.write("Calibrating probabilities (BetaCalibration & Isotonic)...")
+    bc = BetaCalibration(parameters="abm")
+    bc.fit(y_val_bag.reshape(-1,1), y)
+    y_val_beta = bc.predict(y_val_bag.reshape(-1,1))
+    y_today_beta = bc.predict(y_today_bag.reshape(-1,1))
+    ir = IsotonicRegression(out_of_bounds="clip")
+    y_val_iso = ir.fit_transform(y_val_bag, y)
+    y_today_iso = ir.transform(y_today_bag)
+    val_logloss_beta = log_loss(y, y_val_beta)
+    val_logloss_iso = log_loss(y, y_val_iso)
+    if val_logloss_beta < val_logloss_iso:
+        st.success(f"BetaCalibration used (logloss={val_logloss_beta:.4f})")
+        hr_probs = y_today_beta
+    else:
+        st.success(f"Isotonic used (logloss={val_logloss_iso:.4f})")
+        hr_probs = y_today_iso
 
-        ir = IsotonicRegression(out_of_bounds="clip")
-        y_val_iso = ir.fit_transform(y_val_bag, y)
-        y_today_iso = ir.transform(y_today_bag)
-
-        # Choose the best calibration based on logloss
-        val_logloss_beta = log_loss(y, y_val_beta)
-        val_logloss_iso = log_loss(y, y_val_iso)
-        st.write(f"Logloss - BetaCalibration: {val_logloss_beta:.5f}, Isotonic: {val_logloss_iso:.5f}")
-
-        if val_logloss_beta < val_logloss_iso:
-            st.success(f"BetaCalibration selected (logloss={val_logloss_beta:.4f})")
-            hr_probs = y_today_beta
-        else:
-            st.success(f"Isotonic selected (logloss={val_logloss_iso:.4f})")
-            hr_probs = y_today_iso
-
-        today_df['hr_probability'] = hr_probs
-    except Exception as e:
-        st.error(f"Crash during probability calibration! Error: {e}")
-        st.stop()
+    today_df['hr_probability'] = hr_probs
 
     # =========== STICKY, META-BOOSTED LEADERBOARD UPGRADES ===========
-    try:
-        st.write("Sticky meta-learning leaderboard upgrades (supercharging for Top 5/10/30 accuracy)...")
-        today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
-        today_df['hr_base_rank'] = today_df['hr_probability'].rank(method='min', ascending=False)
-        today_df['sticky_hr_boost'] = stickiness_rank_boost(today_df, top_k=10, stickiness_boost=0.19, prev_rank_col=None, hr_col='hr_probability')
-        today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
-        today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
-        today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
-        today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
-        meta_pseudo_y = today_df['sticky_hr_boost'].copy()
-        meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18
-        meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
-        from sklearn.ensemble import GradientBoostingRegressor
-        meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
-        X_meta = today_df[meta_features].values
-        y_meta = meta_pseudo_y.values
-        meta_booster.fit(X_meta, y_meta)
-        today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
-        today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
-    except Exception as e:
-        st.error(f"Crash during meta-reranker/leaderboard step! Error: {e}")
-        st.stop()
+    st.write("Sticky meta-learning leaderboard upgrades (supercharging for Top 5/10/30 accuracy)...")
+    today_df = today_df.sort_values("hr_probability", ascending=False).reset_index(drop=True)
+    today_df['hr_base_rank'] = today_df['hr_probability'].rank(method='min', ascending=False)
+    today_df['sticky_hr_boost'] = stickiness_rank_boost(today_df, top_k=10, stickiness_boost=0.19, prev_rank_col=None, hr_col='hr_probability')
+    today_df['prob_gap_prev'] = today_df['hr_probability'].diff().fillna(0)
+    today_df['prob_gap_next'] = today_df['hr_probability'].shift(-1) - today_df['hr_probability']
+    today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
+    today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
+    meta_pseudo_y = today_df['sticky_hr_boost'].copy()
+    meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18  # Extra stick for top 10
+    meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
+    from sklearn.ensemble import GradientBoostingRegressor
+    meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
+    X_meta = today_df[meta_features].values
+    y_meta = meta_pseudo_y.values
+    meta_booster.fit(X_meta, y_meta)
+    today_df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
+    today_df = today_df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
 
     # Overlay: contextual multipliers
-    try:
-        if any([k in today_df.columns for k in ["wind_mph", "temp", "humidity", "park_hr_rate"]]):
-            today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
-            today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
-            sort_col = "final_hr_probability"
-        else:
-            today_df['final_hr_probability'] = today_df['hr_probability']
-            sort_col = "final_hr_probability"
-    except Exception as e:
-        st.error(f"Crash during overlay/contextual multiplier! Error: {e}")
-        st.stop()
+    if any([k in today_df.columns for k in ["wind_mph", "temp", "humidity", "park_hr_rate"]]):
+        today_df['overlay_multiplier'] = today_df.apply(overlay_multiplier, axis=1)
+        today_df['final_hr_probability'] = (today_df['hr_probability'] * today_df['overlay_multiplier']).clip(0, 1)
+        sort_col = "final_hr_probability"
+    else:
+        today_df['final_hr_probability'] = today_df['hr_probability']
+        sort_col = "final_hr_probability"
 
     # =========== Leaderboard Output ===========
-    try:
-        leaderboard_cols = []
-        if "player_name" in today_df.columns:
-            leaderboard_cols.append("player_name")
-        leaderboard_cols += ["hr_probability", "final_hr_probability", "meta_hr_rank_score"]
-        if 'overlay_multiplier' in today_df.columns:
-            leaderboard_cols.append('overlay_multiplier')
-        leaderboard = today_df[leaderboard_cols].sort_values(sort_col, ascending=False).reset_index(drop=True)
-        leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
-        leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-        leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
-        if 'overlay_multiplier' in leaderboard.columns:
-            leaderboard['overlay_multiplier'] = leaderboard['overlay_multiplier'].round(3)
+    leaderboard_cols = []
+    if "player_name" in today_df.columns:
+        leaderboard_cols.append("player_name")
+    leaderboard_cols += ["hr_probability", "final_hr_probability", "meta_hr_rank_score"]
+    if 'overlay_multiplier' in today_df.columns:
+        leaderboard_cols.append('overlay_multiplier')
+    leaderboard = today_df[leaderboard_cols].sort_values(sort_col, ascending=False).reset_index(drop=True)
+    leaderboard["hr_probability"] = leaderboard["hr_probability"].round(4)
+    leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
+    leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
+    if 'overlay_multiplier' in leaderboard.columns:
+        leaderboard['overlay_multiplier'] = leaderboard['overlay_multiplier'].round(3)
 
-        top_n = 30
-        st.markdown(f"### 🏆 **Top {top_n} Supercharged HR Leaderboard**")
-        leaderboard_top = leaderboard.head(top_n)
-        st.dataframe(leaderboard_top, use_container_width=True)
-        st.download_button(
-            f"⬇️ Download Top {top_n} Leaderboard CSV",
-            data=leaderboard_top.to_csv(index=False),
-            file_name=f"top{top_n}_leaderboard.csv"
-        )
-        st.download_button(
-            "⬇️ Download Full Prediction CSV",
-            data=today_df.to_csv(index=False),
-            file_name="today_hr_predictions_full.csv"
-        )
+    top_n = 30
+    st.markdown(f"### 🏆 **Top {top_n} Supercharged HR Leaderboard**")
+    leaderboard_top = leaderboard.head(top_n)
+    st.dataframe(leaderboard_top, use_container_width=True)
+    st.download_button(
+        f"⬇️ Download Top {top_n} Leaderboard CSV",
+        data=leaderboard_top.to_csv(index=False),
+        file_name=f"top{top_n}_leaderboard.csv"
+    )
 
-        # HR Probability Distribution (Top 30)
-        if "player_name" in leaderboard_top.columns:
-            st.subheader("📊 HR Probability Distribution (Top 30)")
-            fig, ax = plt.subplots(figsize=(10, 7))
-            ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top[sort_col], color='royalblue')
-            ax.invert_yaxis()
-            ax.set_xlabel('Predicted HR Probability')
-            ax.set_ylabel('Player')
-            st.pyplot(fig)
+    st.download_button(
+        "⬇️ Download Full Prediction CSV",
+        data=today_df.to_csv(index=False),
+        file_name="today_hr_predictions_full.csv"
+    )
 
-        # Meta-Ranker Feature Importance
-        st.subheader("🔎 Meta-Ranker Feature Importance")
-        importances = pd.Series(meta_booster.feature_importances_, index=meta_features)
-        st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
+    if "player_name" in leaderboard_top.columns:
+        st.subheader("📊 HR Probability Distribution (Top 30)")
+        fig, ax = plt.subplots(figsize=(10, 7))
+        ax.barh(leaderboard_top["player_name"].astype(str), leaderboard_top[sort_col], color='royalblue')
+        ax.invert_yaxis()
+        ax.set_xlabel('Predicted HR Probability')
+        ax.set_ylabel('Player')
+        st.pyplot(fig)
 
-        # NaN/out of range checks
-        if leaderboard_top.isna().any().any():
-            st.warning("⚠️ NaNs detected in leaderboard! Double-check the input features.")
-        if (leaderboard_top[sort_col] < 0).any() or (leaderboard_top[sort_col] > 1).any():
-            st.warning("⚠️ Some final probabilities are out of [0,1] range!")
+    st.subheader("🔎 Meta-Ranker Feature Importance")
+    importances = pd.Series(meta_booster.feature_importances_, index=meta_features)
+    st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
 
-        # Display drifted features if any
-        drifted = drift_check(X, X_today, n=6)
-        if drifted:
-            st.markdown("#### ⚡ **Feature Drift Diagnostics**")
-            st.write("These features have unusual mean/std changes between training and today, check if input context shifted:", drifted)
+    if leaderboard_top.isna().any().any():
+        st.warning("⚠️ NaNs detected in leaderboard! Double-check the input features.")
+    if (leaderboard_top[sort_col] < 0).any() or (leaderboard_top[sort_col] > 1).any():
+        st.warning("⚠️ Some final probabilities are out of [0,1] range!")
 
-        # Extra: Show prediction histogram (full today set)
-        st.subheader("Prediction Probability Distribution (all predictions)")
-        plt.figure(figsize=(8, 3))
-        plt.hist(today_df[sort_col], bins=30, color='orange', alpha=0.7)
-        plt.xlabel("Final HR Probability")
-        plt.ylabel("Count")
-        st.pyplot(plt.gcf())
-        plt.close()
+    if "drifted" in locals() and drifted:
+        st.markdown("#### ⚡ **Feature Drift Diagnostics**")
+        st.write("These features have unusual mean/std changes between training and today, check if input context shifted:", drifted)
 
-    except Exception as e:
-        st.error(f"Crash during leaderboard/output/plotting! Error: {e}")
-        st.stop()
+    st.subheader("Prediction Probability Distribution (all predictions)")
+    plt.figure(figsize=(8, 3))
+    plt.hist(today_df[sort_col], bins=30, color='orange', alpha=0.7)
+    plt.xlabel("Final HR Probability")
+    plt.ylabel("Count")
+    st.pyplot(plt.gcf())
+    plt.close()
 
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
