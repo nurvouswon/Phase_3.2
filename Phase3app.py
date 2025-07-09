@@ -328,7 +328,7 @@ if event_file is not None and today_file is not None:
     today_df['prob_gap_next'] = today_df['prob_gap_next'].fillna(0)
     today_df['is_top_10_pred'] = (today_df.index < 10).astype(int)
     meta_pseudo_y = label_smooth(today_df['sticky_hr_boost'].values, smooth_amt=0.09)
-    meta_pseudo_y[:10] = meta_pseudo_y[:10] + 0.18)
+    meta_pseudo_y[:10] = meta_pseudo_y[:10] + 0.18
     meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
     from sklearn.ensemble import GradientBoostingRegressor
     meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
