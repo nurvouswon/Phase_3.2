@@ -149,7 +149,7 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
-def auto_feature_crosses(X, max_cross=12, template_cols=None):
+def auto_feature_crosses(X, max_cross=24, template_cols=None):
     cross_names = []
     if template_cols is not None:
         for name in template_cols:
@@ -258,8 +258,8 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X_today, "X_today features")
 
     # ===== PHASE 1: Feature Crosses & Outlier Removal (sync crosses!) =====
-    X, cross_names = auto_feature_crosses(X, max_cross=12)
-    X_today, _ = auto_feature_crosses(X_today, max_cross=12, template_cols=cross_names)
+    X, cross_names = auto_feature_crosses(X, max_cross=24)
+    X_today, _ = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
     st.write(f"Cross features created: {cross_names}")
     st.write(f"After cross sync: X cols {X.shape[1]}, X_today cols {X_today.shape[1]}")
 
