@@ -10,3 +10,4 @@ betacal
 pyarrow
 polars
 fastparquet
+shap
