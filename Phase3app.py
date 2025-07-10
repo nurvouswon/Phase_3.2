@@ -5,7 +5,7 @@ import gc
 import time
 from datetime import timedelta
 from sklearn.model_selection import RepeatedStratifiedKFold
-from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, IsolationForest
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
 from sklearn.preprocessing import StandardScaler
@@ -15,6 +15,7 @@ import catboost as cb
 from sklearn.isotonic import IsotonicRegression
 from betacal import BetaCalibration
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.ensemble import IsolationForest
 import matplotlib.pyplot as plt
 import shap
 
@@ -182,7 +183,6 @@ def remove_outliers(X, y, method="iforest", contamination=0.012):
     return X[mask], y[mask]
 
 def smooth_labels(y, smoothing=0.02):
-    # Only apply smoothing for tree-based models, not sklearn classifiers
     y = np.asarray(y)
     y_smooth = y.copy().astype(float)
     y_smooth[y == 1] = 1 - smoothing
@@ -298,136 +298,95 @@ if event_file is not None and today_file is not None:
 
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
 
-    val_preds = np.zeros((len(y_train), n_splits * n_repeats))
-    test_preds = []
+    val_fold_probas = np.zeros((len(y_train), 6))
+    test_fold_probas = np.zeros((X_today.shape[0], 6))
     scaler = StandardScaler()
     fold_times = []
-    t_start = time.time()
-
-    # --- SHAP for feature importance (use XGB only for speed) ---
     show_shap = st.checkbox("Show SHAP Feature Importance (slow, only for small datasets)", value=False)
-    shap_values, explainer = None, None
-
-    progress = st.progress(0, text="Starting model folds... (please wait, can take several minutes)")
 
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X_train, y_train)):
         t_fold_start = time.time()
-        progress.progress((fold + 1) / (n_splits * n_repeats), text=f"Training fold {fold+1}/{n_splits*n_repeats} ...")
-
-        X_tr, X_va = X_train.iloc[tr_idx].copy(), X_train.iloc[va_idx].copy()
+        X_tr, X_va = X_train.iloc[tr_idx], X_train.iloc[va_idx]
         y_tr, y_va = y_train.iloc[tr_idx], y_train.iloc[va_idx]
-
-        # Label smoothing for *only* the tree-based models:
         y_tr_smooth = smooth_labels(y_tr, 0.02)
-        # For hard-label classifiers, use original y
-        y_tr_hard = y_tr
-
-        # Standard scaling
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
         X_today_scaled = sc.transform(X_today)
 
-        # Models
+        # Tree models
         xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
         lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
         cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
-        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
         gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
+        # Fit with smoothed
+        xgb_clf.fit(X_tr_scaled, y_tr_smooth)
+        lgb_clf.fit(X_tr_scaled, y_tr_smooth)
+        cat_clf.fit(X_tr_scaled, y_tr_smooth)
+        gb_clf.fit(X_tr_scaled, y_tr_smooth)
+        val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
+        test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 3] += gb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        # Hard label models
+        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
         lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+        rf_clf.fit(X_tr_scaled, y_tr)
+        lr_clf.fit(X_tr_scaled, y_tr)
+        val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+        test_fold_probas[:, 4] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 5] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
 
-        # Fit tree models with smoothed labels
-        try:
-            xgb_clf.fit(X_tr_scaled, y_tr_smooth)
-        except Exception as e:
-            st.warning(f"xgb training failed in fold {fold+1}: {e}")
-        try:
-            lgb_clf.fit(X_tr_scaled, y_tr_smooth)
-        except Exception as e:
-            st.warning(f"lgb training failed in fold {fold+1}: {e}")
-        try:
-            cat_clf.fit(X_tr_scaled, y_tr_smooth)
-        except Exception as e:
-            st.warning(f"cat training failed in fold {fold+1}: {e}")
-        try:
-            gb_clf.fit(X_tr_scaled, y_tr_smooth)
-        except Exception as e:
-            st.warning(f"gb training failed in fold {fold+1}: {e}")
-
-        # Fit hard-label models with hard labels
-        try:
-            lr_clf.fit(X_tr_scaled, y_tr_hard)
-        except Exception as e:
-            st.warning(f"lr training failed in fold {fold+1}: {e}")
-
-        # Ensemble using fitted models (safe for probability averaging)
-        models_for_ensemble = [
-            ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf),
-            ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
-        ]
-        ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-        try:
-            # Fit the ensemble (use hard labels; underlying models already trained)
-            ensemble.fit(X_tr_scaled, y_tr_hard)
-            val_preds[va_idx, fold] = ensemble.predict_proba(X_va_scaled)[:, 1]
-            test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
-        except Exception as e:
-            st.error(f"Ensemble failed in fold {fold+1}: {e}")
-            break
-
-        # SHAP summary (first fold only, if toggled)
+        # Optional: SHAP for XGB (first fold only)
         if fold == 0 and show_shap:
             with st.spinner("Computing SHAP values (this can be slow)..."):
                 explainer = shap.TreeExplainer(xgb_clf)
-                shap_values = explainer.shap_values(X_va)
+                shap_values = explainer.shap_values(X_va_scaled)
                 st.write("Top SHAP Features (XGB, validation set):")
-                shap.summary_plot(shap_values, X_va, show=False)
+                shap.summary_plot(shap_values, pd.DataFrame(X_va_scaled, columns=X_tr.columns), show=False)
                 st.pyplot(bbox_inches='tight')
                 plt.clf()
-
-        del X_tr, X_va, X_tr_scaled, X_va_scaled, X_today_scaled
-        gc.collect()
 
         fold_time = time.time() - t_fold_start
         fold_times.append(fold_time)
         avg_time = np.mean(fold_times)
         est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
-        st.write(f"Fold {fold+1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
+        st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
 
-    progress.progress(1.0, text="All folds complete!")
-
-    # Bagged predictions
-    y_val_bag = val_preds.mean(axis=1)
-    y_today_bag = np.mean(np.column_stack(test_preds), axis=1)
+    # Blend all model outputs (simple mean for robust ensemble)
+    y_val_bag = val_fold_probas.mean(axis=1)
+    y_today_bag = test_fold_probas.mean(axis=1)
 
     # ========== OOS TEST ==========
     with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 2,000 rows..."):
         scaler_oos = StandardScaler()
-        X_oos_scaled = scaler_oos.fit(X_oos).transform(X_oos)
-        X_oos_train_scaled = scaler_oos.transform(X_train)
-        # Tree models with smoothed, hard-label models with hard labels
-        ensemble_oos = VotingClassifier(
-            estimators=[
-                ('xgb', xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)),
-                ('lgb', lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)),
-                ('cat', cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)),
-                ('rf', RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)),
-                ('gb', GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)),
-                ('lr', LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1))
-            ],
-            voting='soft',
-            n_jobs=1
-        )
-        # Fit sub-models separately
+        X_oos_train_scaled = scaler_oos.fit_transform(X_train)
+        X_oos_scaled = scaler_oos.transform(X_oos)
+        # For simplicity: blend the four tree models (smoothed), two non-tree (hard)
+        tree_models = [
+            xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
+            lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1),
+            cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1),
+            GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
+        ]
+        hard_models = [
+            RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1),
+            LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+        ]
         y_train_smooth = smooth_labels(y_train, 0.02)
-        ensemble_oos.estimators_[0].fit(X_oos_train_scaled, y_train_smooth)
-        ensemble_oos.estimators_[1].fit(X_oos_train_scaled, y_train_smooth)
-        ensemble_oos.estimators_[2].fit(X_oos_train_scaled, y_train_smooth)
-        ensemble_oos.estimators_[3].fit(X_oos_train_scaled, y_train)      # RF: hard
-        ensemble_oos.estimators_[4].fit(X_oos_train_scaled, y_train_smooth)
-        ensemble_oos.estimators_[5].fit(X_oos_train_scaled, y_train)      # LR: hard
-        ensemble_oos.fit(X_oos_train_scaled, y_train)  # Fit ensemble wrapper (does nothing)
-        oos_probs = ensemble_oos.predict_proba(X_oos_scaled)[:, 1]
+        oos_preds = []
+        for model in tree_models:
+            model.fit(X_oos_train_scaled, y_train_smooth)
+            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
+        for model in hard_models:
+            model.fit(X_oos_train_scaled, y_train)
+            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
+        oos_probs = np.mean(np.column_stack(oos_preds), axis=1)
         oos_auc = roc_auc_score(y_oos, oos_probs)
         oos_logloss = log_loss(y_oos, oos_probs)
         st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
@@ -557,7 +516,7 @@ if event_file is not None and today_file is not None:
         plt.close()
 
     # Memory cleanup
-    del X, X_today, y, val_preds, test_preds, y_train, y_oos, X_train, X_oos
+    del X, X_today, y, val_fold_probas, test_fold_probas, y_train, y_oos, X_train, X_oos
     gc.collect()
 
 else:
