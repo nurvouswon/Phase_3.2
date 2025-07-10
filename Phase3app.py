@@ -319,11 +319,13 @@ if event_file is not None and today_file is not None:
         lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
         cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
         gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
-        # Fit with smoothed
-        xgb_clf.fit(X_tr_scaled, y_tr_smooth)
-        lgb_clf.fit(X_tr_scaled, y_tr_smooth)
-        cat_clf.fit(X_tr_scaled, y_tr_smooth)
-        gb_clf.fit(X_tr_scaled, y_tr_smooth)
+        # For all base models, use hard labels
+        xgb_clf.fit(X_tr_scaled, y_tr)
+        lgb_clf.fit(X_tr_scaled, y_tr)
+        cat_clf.fit(X_tr_scaled, y_tr)
+        rf_clf.fit(X_tr_scaled, y_tr)
+        gb_clf.fit(X_tr_scaled, y_tr)
+        lr_clf.fit(X_tr_scaled, y_tr)
         val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
