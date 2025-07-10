@@ -181,7 +181,7 @@ def remove_outliers(X, y, method="iforest", contamination=0.012):
         mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
     return X[mask], y[mask]
 
-def smooth_labels_for_lr(y, smoothing=0.02):
+def smooth_labels(y, smoothing=0.02):
     y = np.asarray(y)
     y_smooth = y.copy().astype(float)
     y_smooth[y == 1] = 1 - smoothing
@@ -235,11 +235,13 @@ if event_file is not None and today_file is not None:
         st.warning(f"Dropping {len(drop_cols)} features with >30% NaNs: {drop_cols[:20]}")
         X = X.drop(columns=drop_cols)
         X_today = X_today.drop(columns=drop_cols, errors='ignore')
+
     nzv_cols = X.loc[:, X.nunique() <= 2].columns.tolist()
     if nzv_cols:
         st.warning(f"Dropping {len(nzv_cols)} near-constant features.")
         X = X.drop(columns=nzv_cols)
         X_today = X_today.drop(columns=nzv_cols, errors='ignore')
+
     corrs = X.corr().abs()
     upper = corrs.where(np.triu(np.ones(corrs.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > 0.999)]
@@ -247,6 +249,7 @@ if event_file is not None and today_file is not None:
         st.warning(f"Dropping {len(to_drop)} highly correlated features.")
         X = X.drop(columns=to_drop)
         X_today = X_today.drop(columns=to_drop, errors='ignore')
+
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
 
@@ -257,6 +260,7 @@ if event_file is not None and today_file is not None:
     X = X[top_feat_names]
     X_today = X_today[top_feat_names]
     st.success(f"Final number of features after auto-filtering: {X.shape[1]}")
+
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
@@ -292,6 +296,7 @@ if event_file is not None and today_file is not None:
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
+
     val_preds = np.zeros((len(y_train), n_splits * n_repeats))
     test_preds = []
     scaler = StandardScaler()
@@ -311,36 +316,42 @@ if event_file is not None and today_file is not None:
         X_tr, X_va = X_train.iloc[tr_idx].copy(), X_train.iloc[va_idx].copy()
         y_tr, y_va = y_train.iloc[tr_idx], y_train.iloc[va_idx]
 
-        # Standard scaling
+        # Label smoothing only for tree models
+        y_tr_smooth = smooth_labels(y_tr, 0.02)
+
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
         X_today_scaled = sc.transform(X_today)
 
-        # Smoothing for LR only, integer y for trees
-        y_tr_lr = smooth_labels_for_lr(y_tr, 0.02)
+        # Models
         xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
         lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
         cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
         rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
         gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
         lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-        # Each model uses correct y:
-        xgb_clf.fit(X_tr_scaled, y_tr)
-        lgb_clf.fit(X_tr_scaled, y_tr)
-        cat_clf.fit(X_tr_scaled, y_tr)
-        rf_clf.fit(X_tr_scaled, y_tr)
-        gb_clf.fit(X_tr_scaled, y_tr)
-        lr_clf.fit(X_tr_scaled, y_tr_lr)
+
+        # Fit tree models with smoothed labels
+        xgb_clf.fit(X_tr_scaled, y_tr_smooth)
+        lgb_clf.fit(X_tr_scaled, y_tr_smooth)
+        cat_clf.fit(X_tr_scaled, y_tr_smooth)
+        rf_clf.fit(X_tr_scaled, y_tr_smooth)
+        gb_clf.fit(X_tr_scaled, y_tr_smooth)
+        # Fit LR with original labels (NO smoothing)
+        lr_clf.fit(X_tr_scaled, y_tr)
 
         models_for_ensemble = [
-            ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf),
-            ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
+            ('xgb', xgb_clf), ('lgb', lgb_clf), ('cat', cat_clf), ('rf', rf_clf), ('gb', gb_clf), ('lr', lr_clf)
         ]
         ensemble = VotingClassifier(estimators=models_for_ensemble, voting='soft', n_jobs=1)
-        ensemble.fit(X_tr_scaled, y_tr)
-        val_preds[va_idx, fold] = ensemble.predict_proba(X_va_scaled)[:, 1]
-        test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
+        try:
+            ensemble.fit(X_tr_scaled, y_tr)
+            val_preds[va_idx, fold] = ensemble.predict_proba(X_va_scaled)[:, 1]
+            test_preds.append(ensemble.predict_proba(X_today_scaled)[:, 1])
+        except Exception as e:
+            st.error(f"Ensemble failed in fold {fold+1}: {e}")
+            break
 
         # Only do SHAP on first fold and only if toggled
         if fold == 0 and show_shap:
@@ -372,26 +383,26 @@ if event_file is not None and today_file is not None:
         scaler_oos = StandardScaler()
         X_oos_scaled = scaler_oos.fit(X_oos).transform(X_oos)
         X_oos_train_scaled = scaler_oos.transform(X_train)
-        # Ensemble (re-fit on all X_train for OOS)
+        # Ensemble (re-fit on all X_train for OOS, with smoothing for tree models)
         xgb_oos = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
         lgb_oos = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
         cat_oos = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
         rf_oos = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
         gb_oos = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
         lr_oos = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-        xgb_oos.fit(X_oos_train_scaled, y_train)
-        lgb_oos.fit(X_oos_train_scaled, y_train)
-        cat_oos.fit(X_oos_train_scaled, y_train)
-        rf_oos.fit(X_oos_train_scaled, y_train)
-        gb_oos.fit(X_oos_train_scaled, y_train)
-        lr_oos.fit(X_oos_train_scaled, smooth_labels_for_lr(y_train, 0.02))
+        # Fit tree models with smoothed labels, LR with original labels
+        y_train_smooth = smooth_labels(y_train, 0.02)
+        xgb_oos.fit(X_oos_train_scaled, y_train_smooth)
+        lgb_oos.fit(X_oos_train_scaled, y_train_smooth)
+        cat_oos.fit(X_oos_train_scaled, y_train_smooth)
+        rf_oos.fit(X_oos_train_scaled, y_train_smooth)
+        gb_oos.fit(X_oos_train_scaled, y_train_smooth)
+        lr_oos.fit(X_oos_train_scaled, y_train)
         ensemble_oos = VotingClassifier(
             estimators=[
-                ('xgb', xgb_oos), ('lgb', lgb_oos), ('cat', cat_oos),
-                ('rf', rf_oos), ('gb', gb_oos), ('lr', lr_oos)
+                ('xgb', xgb_oos), ('lgb', lgb_oos), ('cat', cat_oos), ('rf', rf_oos), ('gb', gb_oos), ('lr', lr_oos)
             ],
-            voting='soft',
-            n_jobs=1
+            voting='soft', n_jobs=1
         )
         ensemble_oos.fit(X_oos_train_scaled, y_train)
         oos_probs = ensemble_oos.predict_proba(X_oos_scaled)[:, 1]
