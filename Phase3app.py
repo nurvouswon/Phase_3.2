@@ -308,7 +308,6 @@ if event_file is not None and today_file is not None:
         t_fold_start = time.time()
         X_tr, X_va = X_train.iloc[tr_idx], X_train.iloc[va_idx]
         y_tr, y_va = y_train.iloc[tr_idx], y_train.iloc[va_idx]
-        y_tr_smooth = smooth_labels(y_tr, 0.02)
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
@@ -319,28 +318,28 @@ if event_file is not None and today_file is not None:
         lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
         cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
         gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
-        # For all base models, use hard labels
+        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
+        lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+
+        # Fit all with hard labels (classification)
         xgb_clf.fit(X_tr_scaled, y_tr)
         lgb_clf.fit(X_tr_scaled, y_tr)
         cat_clf.fit(X_tr_scaled, y_tr)
-        rf_clf.fit(X_tr_scaled, y_tr)
         gb_clf.fit(X_tr_scaled, y_tr)
+        rf_clf.fit(X_tr_scaled, y_tr)
         lr_clf.fit(X_tr_scaled, y_tr)
+
         val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+
         test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 3] += gb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        # Hard label models
-        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
-        lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-        rf_clf.fit(X_tr_scaled, y_tr)
-        lr_clf.fit(X_tr_scaled, y_tr)
-        val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
         test_fold_probas[:, 4] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 5] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
 
@@ -369,23 +368,17 @@ if event_file is not None and today_file is not None:
         scaler_oos = StandardScaler()
         X_oos_train_scaled = scaler_oos.fit_transform(X_train)
         X_oos_scaled = scaler_oos.transform(X_oos)
-        # For simplicity: blend the four tree models (smoothed), two non-tree (hard)
-        tree_models = [
+        oos_preds = []
+        # Use all base models as above
+        models = [
             xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
             lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1),
             cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1),
-            GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
-        ]
-        hard_models = [
+            GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08),
             RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1),
             LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
         ]
-        y_train_smooth = smooth_labels(y_train, 0.02)
-        oos_preds = []
-        for model in tree_models:
-            model.fit(X_oos_train_scaled, y_train_smooth)
-            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
-        for model in hard_models:
+        for model in models:
             model.fit(X_oos_train_scaled, y_train)
             oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
         oos_probs = np.mean(np.column_stack(oos_preds), axis=1)
