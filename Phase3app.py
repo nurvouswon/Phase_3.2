@@ -91,6 +91,90 @@ def feature_debug(X):
             st.write(f"Column {col} is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
+@st.cache_data(show_spinner=False, max_entries=2)
+def goat_cross_features(X, max_cross=48):
+    """
+    Autogenerate MLB HR super-cross-features: products, diffs, ratios, with context (park, weather, matchup).
+    Only adds, does not remove anything.
+    """
+    st.write("⚡ [DEBUG] Running GOAT cross-feature generation...")
+
+    stat_fields = [
+        "hit_dist_avg", "avg_exit_velo", "hard_hit_rate", "barrel_rate", "fb_rate", "slg",
+        "sweet_spot_rate", "pull_rate", "spray_angle_avg", "hard_contact_rate"
+    ]
+    windows = ["3", "5", "7", "14", "20", "30", "60"]
+    context_fields = ['park_hr_rate', 'temp', 'wind_mph', 'humidity', 'park_altitude']
+    hand_fields = ['stand', 'pitcher_hand']
+
+    cross_names = []
+    cols = X.columns
+
+    # 1. Stat * Stat (b/p all pairs, diff, prod, ratio)
+    for stat in stat_fields:
+        for w1 in windows:
+            b_col = f"b_{stat}_{w1}"
+            p_col = f"p_{stat}_{w1}"
+            if b_col in cols and p_col in cols:
+                # Product, diff, ratio
+                new1 = f"{b_col}*{p_col}"
+                new2 = f"{b_col}-{p_col}"
+                new3 = f"({b_col}+0.01)/({p_col}+0.01)"
+                X[new1] = X[b_col] * X[p_col]
+                X[new2] = X[b_col] - X[p_col]
+                X[new3] = (X[b_col] + 0.01) / (X[p_col] + 0.01)
+                cross_names += [new1, new2, new3]
+
+    # 2. Stat (batter/pitcher) × Context (weather, park)
+    for stat in stat_fields:
+        for w in windows:
+            for ctx in context_fields:
+                for prefix in ['b', 'p']:
+                    s_col = f"{prefix}_{stat}_{w}"
+                    if s_col in cols and ctx in cols:
+                        newname = f"{s_col}*{ctx}"
+                        X[newname] = X[s_col] * X[ctx]
+                        cross_names.append(newname)
+
+    # 3. “Momentum” stats (rolling changes)
+    for stat in stat_fields:
+        for w1, w2 in zip(windows, windows[1:]):
+            for prefix in ['b', 'p']:
+                c1, c2 = f"{prefix}_{stat}_{w1}", f"{prefix}_{stat}_{w2}"
+                if c1 in cols and c2 in cols:
+                    n1 = f"{c1}-{c2}"
+                    X[n1] = X[c1] - X[c2]
+                    cross_names.append(n1)
+
+    # 4. Stat × Handedness (interaction)
+    for stat in stat_fields:
+        for w in windows:
+            for prefix in ['b', 'p']:
+                s_col = f"{prefix}_{stat}_{w}"
+                if s_col in cols:
+                    for hand in hand_fields:
+                        if hand in cols:
+                            n = f"{s_col}*{hand}"
+                            X[n] = X[s_col] * (X[hand] if X[hand].dtype != 'O' else pd.factorize(X[hand])[0])
+                            cross_names.append(n)
+
+    # 5. Powerful nonlinear/indicator cross-features (only if columns exist)
+    special_features = [
+        ("b_barrel_rate_5", "park_hr_rate"),
+        ("b_avg_exit_velo_3", "temp"),
+        ("b_fb_rate_5", "wind_mph"),
+        ("b_hard_hit_rate_5", "humidity"),
+        ("b_hr_count_3", "park_altitude")
+    ]
+    for f1, f2 in special_features:
+        if f1 in cols and f2 in cols:
+            n = f"{f1}*{f2}"
+            X[n] = X[f1] * X[f2]
+            cross_names.append(n)
+
+    st.write(f"⚡ [DEBUG] GOAT-level cross features added: {len(cross_names)}")
+    return X, cross_names
+    
 def overlay_multiplier(row):
     multiplier = 1.0
     wind_col = 'wind_mph'
@@ -257,10 +341,10 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X, "X features")
     nan_inf_check(X_today, "X_today features")
 
-    # ===== PHASE 1: Feature Crosses & Outlier Removal (sync crosses!) =====
-    X, cross_names = auto_feature_crosses(X, max_cross=24)
-    X_today, _ = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
-    st.write(f"Cross features created: {cross_names}")
+    # ===== PHASE 1: GOAT Feature Crosses & Outlier Removal (fully synced, fast) =====
+    X, cross_names = goat_cross_features(X, max_cross=48)
+    X_today, _ = goat_cross_features(X_today, max_cross=48)
+    st.write(f"GOAT Cross features created: {cross_names}")
     st.write(f"After cross sync: X cols {X.shape[1]}, X_today cols {X_today.shape[1]}")
 
     # Outlier removal (train only)
