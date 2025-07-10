@@ -4,7 +4,7 @@ import numpy as np
 import gc
 import time
 from datetime import timedelta
-from sklearn.model_selection import train_test_split, RepeatedStratifiedKFold
+from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier, GradientBoostingClassifier, IsolationForest
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, log_loss
@@ -186,9 +186,6 @@ def remove_outliers(X, y, method="iforest", contamination=0.012):
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
-# 🔥 UPGRADE: Out-of-sample option
-oos_test = None
-
 if event_file is not None and today_file is not None:
     with st.spinner("Loading and prepping files..."):
         event_df = safe_read_cached(event_file)
@@ -210,14 +207,6 @@ if event_file is not None and today_file is not None:
         st.write(f"event_df shape: {event_df.shape}, today_df shape: {today_df.shape}")
         st.write(f"event_df memory usage (MB): {event_df.memory_usage(deep=True).sum() / 1024**2:.2f}")
         st.write(f"today_df memory usage (MB): {today_df.memory_usage(deep=True).sum() / 1024**2:.2f}")
-
-    # 🔥 UPGRADE: Optional out-of-sample test set
-    if st.checkbox("Reserve most recent 2000 events as OOS test set?", value=False):
-        if 'game_date' in event_df.columns:
-            test_mask = event_df['game_date'].rank(method="first", ascending=False) <= 2000
-            oos_test = event_df[test_mask].copy()
-            event_df = event_df[~test_mask].copy()
-            st.write(f"Reserved {oos_test.shape[0]} for OOS testing, {event_df.shape[0]} for training.")
 
     target_col = 'hr_outcome'
     if target_col not in event_df.columns:
@@ -254,13 +243,6 @@ if event_file is not None and today_file is not None:
         X = X.drop(columns=to_drop)
         X_today = X_today.drop(columns=to_drop, errors='ignore')
 
-    # 🔥 UPGRADE: drop "phantom" features with >99% zero or -1
-    high_zero_cols = [c for c in X.columns if ((X[c] == 0).mean() > 0.99) or ((X[c] == -1).mean() > 0.99)]
-    if high_zero_cols:
-        st.warning(f"Dropping {len(high_zero_cols)} 99%+ zero/-1 features.")
-        X = X.drop(columns=high_zero_cols)
-        X_today = X_today.drop(columns=high_zero_cols, errors='ignore')
-
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
 
@@ -280,13 +262,6 @@ if event_file is not None and today_file is not None:
     X_today, _ = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
     st.write(f"Cross features created: {cross_names}")
     st.write(f"After cross sync: X cols {X.shape[1]}, X_today cols {X_today.shape[1]}")
-
-    # 🔥 UPGRADE: enforce column alignment for X_today
-    missing_cols = set(X.columns) - set(X_today.columns)
-    for c in missing_cols:
-        X_today[c] = -1
-    X_today = X_today[X.columns]
-
     # Outlier removal (train only)
     y = event_df[target_col].astype(int)
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
@@ -295,20 +270,30 @@ if event_file is not None and today_file is not None:
     st.write(f"Rows after outlier removal: {X.shape[0]}")
     st.write(f"X index: {X.index.min()}-{X.index.max()}, y index: {y.index.min()}-{y.index.max()}, X shape: {X.shape}, y shape: {y.shape}")
 
-    # ===== Sampling for Streamlit Cloud =====
-    if X.shape[0] > 15000:
-        st.warning(f"Training limited to 15000 rows for memory (full dataset was {X.shape[0]} rows).")
-        X = X.iloc[:15000].copy()
-        y = y.iloc[:15000].copy()
+    # ==== AUTOMATIC TRAIN/OOS SPLIT ====
+    OOS_SIZE = 2000
+    TRAIN_LIMIT = 15000
+    if X.shape[0] > (TRAIN_LIMIT + OOS_SIZE):
+        st.info(f"🔒 Automatically reserving last {OOS_SIZE} rows for Out-of-Sample (OOS) test. Using first {TRAIN_LIMIT} for training.")
+        X_main = X.iloc[:TRAIN_LIMIT].copy()
+        y_main = y.iloc[:TRAIN_LIMIT].copy()
+        X_oos = X.iloc[-OOS_SIZE:].copy()
+        y_oos = y.iloc[-OOS_SIZE:].copy()
+    else:
+        X_main = X.copy()
+        y_main = y.copy()
+        X_oos = None
+        y_oos = None
+        st.warning("Not enough rows to reserve 2000 for OOS test. All available rows used for training and validation.")
 
     # ---- KFold Setup ----
     n_splits = 3
     n_repeats = 2
-    st.write(f"Preparing KFold splits: X {X.shape}, y {y.shape}, X_today {X_today.shape}")
+    st.write(f"Preparing KFold splits: X {X_main.shape}, y {y_main.shape}, X_today {X_today.shape}")
 
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
 
-    val_preds = np.zeros((len(y), n_splits * n_repeats))
+    val_preds = np.zeros((len(y_main), n_splits * n_repeats))
     test_preds = []
     scaler = StandardScaler()
     fold_times = []
@@ -316,17 +301,17 @@ if event_file is not None and today_file is not None:
 
     progress = st.progress(0, text="Starting model folds... (please wait, can take several minutes)")
 
-    for fold, (tr_idx, va_idx) in enumerate(rskf.split(X, y)):
+    for fold, (tr_idx, va_idx) in enumerate(rskf.split(X_main, y_main)):
         t_fold_start = time.time()
         progress.progress((fold + 1) / (n_splits * n_repeats), text=f"Training fold {fold+1}/{n_splits*n_repeats} ...")
 
         # Diagnostic
         if fold == 0:
             st.write(f"First fold train idx: {tr_idx[:5]}... val idx: {va_idx[:5]}...")
-            st.write(f"Train shape: {X.iloc[tr_idx].shape}, Val shape: {X.iloc[va_idx].shape}")
+            st.write(f"Train shape: {X_main.iloc[tr_idx].shape}, Val shape: {X_main.iloc[va_idx].shape}")
 
-        X_tr, X_va = X.iloc[tr_idx].copy(), X.iloc[va_idx].copy()
-        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
+        X_tr, X_va = X_main.iloc[tr_idx].copy(), X_main.iloc[va_idx].copy()
+        y_tr, y_va = y_main.iloc[tr_idx], y_main.iloc[va_idx]
 
         # Standard scaling
         sc = scaler.fit(X_tr)
@@ -334,16 +319,9 @@ if event_file is not None and today_file is not None:
         X_va_scaled = sc.transform(X_va)
         X_today_scaled = sc.transform(X_today)
 
-        # 🔥 UPGRADE: Detect categorical features for LGBM/CatBoost
-        cat_features = [c for c in X_tr.columns if X_tr[c].dtype == 'O' or c in ['park', 'city', 'team_code', 'pitcher_hand']]
-        if not cat_features:
-            lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
-            cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
-        else:
-            lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1, categorical_feature=cat_features)
-            cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1, cat_features=cat_features)
-
         xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
+        lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
+        cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
         rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
         gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
         lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
@@ -367,16 +345,6 @@ if event_file is not None and today_file is not None:
             st.error(f"Ensemble failed in fold {fold+1}: {e}")
             break
 
-        # 🔥 UPGRADE: Permutation importance (on first fold only, for diagnostics)
-        if fold == 0:
-            try:
-                importances = permutation_importance(ensemble, X_va_scaled, y_va, n_repeats=3, random_state=42)
-                imp_df = pd.DataFrame({"feature": X_tr.columns, "importance": importances.importances_mean})
-                st.write("Permutation Feature Importances (fold 1):")
-                st.dataframe(imp_df.sort_values("importance", ascending=False).head(24))
-            except Exception as e:
-                st.warning(f"Permutation importance failed: {e}")
-
         # Release memory aggressively
         del X_tr, X_va, X_tr_scaled, X_va_scaled
         gc.collect()
@@ -384,7 +352,7 @@ if event_file is not None and today_file is not None:
         fold_time = time.time() - t_fold_start
         fold_times.append(fold_time)
         avg_time = np.mean(fold_times)
-        est_time_left = avg_time * ((n_splits*n_repeats) - (fold+1))
+        est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
         st.write(f"Fold {fold+1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
 
     progress.progress(1.0, text="All folds complete!")
@@ -393,19 +361,30 @@ if event_file is not None and today_file is not None:
     y_val_bag = val_preds.mean(axis=1)
     y_today_bag = np.mean(np.column_stack(test_preds), axis=1)
 
+    # ===== OOS TEST (if available) =====
+    if X_oos is not None and y_oos is not None:
+        st.info("🔍 Running Out-Of-Sample (OOS) test on last 2,000 rows...")
+        X_oos_scaled = scaler.transform(X_oos)
+        oos_preds = ensemble.predict_proba(X_oos_scaled)[:, 1]
+        oos_auc = roc_auc_score(y_oos, oos_preds)
+        oos_logloss = log_loss(y_oos, oos_preds)
+        st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
+    else:
+        oos_preds = None
+
     # ===== Calibration =====
     st.write("Calibrating probabilities (BetaCalibration & Isotonic)...")
     bc = BetaCalibration(parameters="abm")
-    bc.fit(y_val_bag.reshape(-1,1), y)
+    bc.fit(y_val_bag.reshape(-1,1), y_main)
     y_val_beta = bc.predict(y_val_bag.reshape(-1,1))
     y_today_beta = bc.predict(y_today_bag.reshape(-1,1))
     ir = IsotonicRegression(out_of_bounds="clip")
-    y_val_iso = ir.fit_transform(y_val_bag, y)
+    y_val_iso = ir.fit_transform(y_val_bag, y_main)
     y_today_iso = ir.transform(y_today_bag)
 
     # Use the best calibration method based on logloss
-    val_logloss_beta = log_loss(y, y_val_beta)
-    val_logloss_iso = log_loss(y, y_val_iso)
+    val_logloss_beta = log_loss(y_main, y_val_beta)
+    val_logloss_iso = log_loss(y_main, y_val_iso)
     if val_logloss_beta < val_logloss_iso:
         st.success(f"BetaCalibration used (logloss={val_logloss_beta:.4f})")
         hr_probs = y_today_beta
@@ -496,7 +475,7 @@ if event_file is not None and today_file is not None:
         st.warning("⚠️ Some final probabilities are out of [0,1] range!")
 
     # Display drifted features if any
-    drifted = drift_check(X, X_today, n=6)
+    drifted = drift_check(X_main, X_today, n=6)
     if drifted:
         st.markdown("#### ⚡ **Feature Drift Diagnostics**")
         st.write("These features have unusual mean/std changes between training and today, check if input context shifted:", drifted)
@@ -509,21 +488,6 @@ if event_file is not None and today_file is not None:
     plt.ylabel("Count")
     st.pyplot(plt.gcf())
     plt.close()
-
-    # 🔥 UPGRADE: Out-of-sample test diagnostics
-    if oos_test is not None:
-        st.subheader("OOS Test Diagnostics")
-        X_oos = clean_X(oos_test[top_feat_names])
-        X_oos, _ = auto_feature_crosses(X_oos, max_cross=24, template_cols=cross_names)
-        y_oos = oos_test[target_col].astype(int)
-        sc_oos = scaler.fit(X_oos)
-        X_oos_scaled = sc_oos.transform(X_oos)
-        try:
-            oos_pred = ensemble.predict_proba(X_oos_scaled)[:, 1]
-            st.write("OOS ROC AUC:", roc_auc_score(y_oos, oos_pred))
-            st.write("OOS Log Loss:", log_loss(y_oos, oos_pred))
-        except Exception as e:
-            st.warning(f"OOS diagnostics failed: {e}")
 
     # Memory cleanup
     del X, X_today, y, val_preds, test_preds
