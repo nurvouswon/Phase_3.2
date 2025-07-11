@@ -292,14 +292,14 @@ if event_file is not None and today_file is not None:
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 3
+    n_splits = 4
     n_repeats = 2
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
 
-    val_fold_probas = np.zeros((len(y_train), 6))
-    test_fold_probas = np.zeros((X_today.shape[0], 6))
+    val_fold_probas = np.zeros((len(y_train), 8))
+    test_fold_probas = np.zeros((X_today.shape[0], 8))
     scaler = StandardScaler()
     fold_times = []
     show_shap = st.checkbox("Show SHAP Feature Importance (slow, only for small datasets)", value=False)
