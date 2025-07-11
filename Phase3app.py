@@ -488,7 +488,38 @@ if event_file is not None and today_file is not None:
         oos_auc = roc_auc_score(y_oos, oos_probs)
         oos_logloss = log_loss(y_oos, oos_probs)
         st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
+    # ==== OOS: Calibrated Model Performance Display ====
+    st.markdown("### 📊 OOS Calibrated Model Performance (BetaCalibration, Isotonic, Blend)")
 
+    # -- Calibrate using validation calibrators --
+    oos_val_bag = np.mean(np.column_stack(oos_preds), axis=1)
+
+    # Reuse same calibrators as above (already fitted)
+    # If not accessible, fit again as below:
+
+    # BetaCalibration on OOS
+    oos_bc = BetaCalibration(parameters="abm")
+    oos_bc.fit(y_val_bag.reshape(-1,1), y_train)
+    oos_pred_beta = oos_bc.predict(oos_val_bag.reshape(-1,1))
+
+    # Isotonic Regression on OOS
+    oos_ir = IsotonicRegression(out_of_bounds="clip")
+    oos_pred_iso = oos_ir.fit(y_val_bag, y_train).transform(oos_val_bag)
+
+    # Blended
+    oos_pred_blend = 0.5 * oos_pred_beta + 0.5 * oos_pred_iso
+
+    # OOS AUC/LogLoss
+    oos_auc_beta = roc_auc_score(y_oos, oos_pred_beta)
+    oos_logloss_beta = log_loss(y_oos, oos_pred_beta)
+    oos_auc_iso = roc_auc_score(y_oos, oos_pred_iso)
+    oos_logloss_iso = log_loss(y_oos, oos_pred_iso)
+    oos_auc_blend = roc_auc_score(y_oos, oos_pred_blend)
+    oos_logloss_blend = log_loss(y_oos, oos_pred_blend)
+
+    st.write(f"**BetaCalibration:**   AUC = {oos_auc_beta:.4f}   |   LogLoss = {oos_logloss_beta:.4f}")
+    st.write(f"**IsotonicRegression:**   AUC = {oos_auc_iso:.4f}   |   LogLoss = {oos_logloss_iso:.4f}")
+    st.write(f"**Blended:**   AUC = {oos_auc_blend:.4f}   |   LogLoss = {oos_logloss_blend:.4f}")
     # ===== Calibration =====
     st.write("Calibrating probabilities (BetaCalibration & Isotonic & Blend)...")
     bc = BetaCalibration(parameters="abm")
