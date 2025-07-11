@@ -370,46 +370,53 @@ if event_file is not None and today_file is not None:
             n_estimators=120,             # More estimators for accuracy, still fast
             max_depth=6,                  # Lower depth to prevent overfit and keep speed
             learning_rate=0.07,           # Slightly lower learning rate for stability
-    subsample=0.8,                # Adds regularization, slightly faster
-    colsample_bytree=0.8,         # Randomness, regularization
-    use_label_encoder=False,
-    eval_metric='logloss',
-    n_jobs=1,
-    verbosity=0
-)
+            subsample=0.8,                # Adds regularization, slightly faster
+            colsample_bytree=0.8,         # Randomness, regularization
+            use_label_encoder=False,
+            eval_metric='logloss',
+            n_jobs=1,
+            verbosity=0
+        )
 
-lgb_clf = lgb.LGBMClassifier(
-    n_estimators=120,
-    max_depth=7,
-    num_leaves=31,                # Standard, good for accuracy
-    learning_rate=0.07,
-    subsample=0.8,
-    feature_fraction=0.8,         # Use only a fraction of features at each split
-    n_jobs=1
-)
+        lgb_clf = lgb.LGBMClassifier(
+            n_estimators=120,
+            max_depth=7,
+            num_leaves=31,
+            learning_rate=0.07,
+            subsample=0.8,
+            feature_fraction=0.8,
+            n_jobs=1
+        )
 
-cat_clf = cb.CatBoostClassifier(
-    iterations=120,
-    depth=7,
-    learning_rate=0.08,
-    verbose=0,
-    thread_count=1
-)
+        cat_clf = cb.CatBoostClassifier(
+            iterations=120,
+            depth=7,
+            learning_rate=0.08,
+            verbose=0,
+            thread_count=1
+        )
 
-rf_clf = RandomForestClassifier(
-    n_estimators=120,            # Slightly higher for smoother voting
-    max_depth=8,
-    max_features=0.7,            # Use 70% of features for more randomness
-    min_samples_leaf=2,          # Slightly higher for regularization
-    n_jobs=1
-)
+        rf_clf = RandomForestClassifier(
+            n_estimators=120,
+            max_depth=8,
+            max_features=0.7,
+            min_samples_leaf=2,
+            n_jobs=1
+        )
 
-gb_clf = GradientBoostingClassifier(
-    n_estimators=100,            # More trees for better performance
-    max_depth=5,                 # Shallow trees generalize better, are fast
-    learning_rate=0.08,
-    subsample=0.8                # Subsample for regularization
-)
+        gb_clf = GradientBoostingClassifier(
+            n_estimators=100,
+            max_depth=5,
+            learning_rate=0.08,
+            subsample=0.8
+        )
+
+        lr_clf = LogisticRegression(
+            max_iter=600,
+            solver='lbfgs',
+            n_jobs=1
+        )
+
         xgb_clf.fit(X_tr_scaled, y_tr)
         lgb_clf.fit(X_tr_scaled, y_tr)
         cat_clf.fit(X_tr_scaled, y_tr)
@@ -423,9 +430,10 @@ gb_clf = GradientBoostingClassifier(
         val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
-        # Duplicate for 8 models in arrays (compatibility)
+        # Duplicate for 8-models shape (compatibility)
         val_fold_probas[va_idx, 6] = rf_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 7] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+
         test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
@@ -435,7 +443,6 @@ gb_clf = GradientBoostingClassifier(
         test_fold_probas[:, 6] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 7] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
 
-        # SHAP (optional)
         if fold == 0 and show_shap:
             with st.spinner("Computing SHAP values (this can be slow)..."):
                 explainer = shap.TreeExplainer(xgb_clf)
