@@ -54,7 +54,7 @@ def fix_types(df):
 def clean_X(df, train_cols=None):
     df = dedup_columns(df)
     df = fix_types(df)
-    allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status'}
+    allowed_obj = {'wind_dir_string', 'condition', 'player_name', 'city', 'park', 'roof_status', 'team_code', 'time'}
     drop_cols = [c for c in df.select_dtypes('O').columns if c not in allowed_obj]
     df = df.drop(columns=drop_cols, errors='ignore')
     df = df.fillna(-1)
@@ -66,7 +66,7 @@ def clean_X(df, train_cols=None):
     return df
 
 def get_valid_feature_cols(df, drop=None):
-    base_drop = set(['game_date','batter_id','player_name','pitcher_id','city','park','roof_status'])
+    base_drop = set(['game_date','batter_id','player_name','pitcher_id','city','park','roof_status','team_code','time'])
     if drop: base_drop = base_drop.union(drop)
     numerics = df.select_dtypes(include=[np.number]).columns
     return [c for c in numerics if c not in base_drop]
@@ -189,6 +189,57 @@ def smooth_labels(y, smoothing=0.02):
     y_smooth[y == 0] = smoothing
     return y_smooth
 
+# --------- Weather Rating Helper ---------
+def rate_weather(row):
+    ratings = {}
+    # Temperature
+    temp = row.get("temp", np.nan)
+    if pd.isna(temp):
+        ratings["temp_rating"] = "?"
+    elif 68 <= temp <= 85:
+        ratings["temp_rating"] = "Excellent"
+    elif 60 <= temp < 68 or 85 < temp <= 92:
+        ratings["temp_rating"] = "Good"
+    elif 50 <= temp < 60 or 92 < temp <= 98:
+        ratings["temp_rating"] = "Fair"
+    else:
+        ratings["temp_rating"] = "Poor"
+    # Humidity
+    humidity = row.get("humidity", np.nan)
+    if pd.isna(humidity):
+        ratings["humidity_rating"] = "?"
+    elif 45 <= humidity <= 65:
+        ratings["humidity_rating"] = "Excellent"
+    elif 30 <= humidity < 45 or 65 < humidity <= 80:
+        ratings["humidity_rating"] = "Good"
+    elif 15 <= humidity < 30 or 80 < humidity <= 90:
+        ratings["humidity_rating"] = "Fair"
+    else:
+        ratings["humidity_rating"] = "Poor"
+    # Wind MPH
+    wind = row.get("wind_mph", np.nan)
+    if pd.isna(wind):
+        ratings["wind_rating"] = "?"
+    elif wind < 6:
+        ratings["wind_rating"] = "Excellent"
+    elif 6 <= wind < 12:
+        ratings["wind_rating"] = "Good"
+    elif 12 <= wind < 18:
+        ratings["wind_rating"] = "Fair"
+    else:
+        ratings["wind_rating"] = "Poor"
+    # Condition
+    condition = str(row.get("condition", "")).lower()
+    if "clear" in condition or "sun" in condition or "outdoor" in condition:
+        ratings["condition_rating"] = "Excellent"
+    elif "cloud" in condition or "partly" in condition:
+        ratings["condition_rating"] = "Good"
+    elif "rain" in condition or "fog" in condition:
+        ratings["condition_rating"] = "Poor"
+    else:
+        ratings["condition_rating"] = "Fair"
+    return pd.Series(ratings)
+
 # ---- APP START ----
 
 event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
@@ -308,39 +359,83 @@ if event_file is not None and today_file is not None:
         t_fold_start = time.time()
         X_tr, X_va = X_train.iloc[tr_idx], X_train.iloc[va_idx]
         y_tr, y_va = y_train.iloc[tr_idx], y_train.iloc[va_idx]
-        # No smoothing for hard label classifiers!
         sc = scaler.fit(X_tr)
         X_tr_scaled = sc.transform(X_tr)
         X_va_scaled = sc.transform(X_va)
         X_today_scaled = sc.transform(X_today)
 
-        # Tree models
-        xgb_clf = xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0)
-        lgb_clf = lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1)
-        cat_clf = cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1)
-        gb_clf = GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
-        rf_clf = RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1)
-        lr_clf = LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+        # --- Optimized Tree Model Instantiations ---
+
+        xgb_clf = xgb.XGBClassifier(
+            n_estimators=120,             # More estimators for accuracy, still fast
+            max_depth=6,                  # Lower depth to prevent overfit and keep speed
+            learning_rate=0.07,           # Slightly lower learning rate for stability
+    subsample=0.8,                # Adds regularization, slightly faster
+    colsample_bytree=0.8,         # Randomness, regularization
+    use_label_encoder=False,
+    eval_metric='logloss',
+    n_jobs=1,
+    verbosity=0
+)
+
+lgb_clf = lgb.LGBMClassifier(
+    n_estimators=120,
+    max_depth=7,
+    num_leaves=31,                # Standard, good for accuracy
+    learning_rate=0.07,
+    subsample=0.8,
+    feature_fraction=0.8,         # Use only a fraction of features at each split
+    n_jobs=1
+)
+
+cat_clf = cb.CatBoostClassifier(
+    iterations=120,
+    depth=7,
+    learning_rate=0.08,
+    verbose=0,
+    thread_count=1
+)
+
+rf_clf = RandomForestClassifier(
+    n_estimators=120,            # Slightly higher for smoother voting
+    max_depth=8,
+    max_features=0.7,            # Use 70% of features for more randomness
+    min_samples_leaf=2,          # Slightly higher for regularization
+    n_jobs=1
+)
+
+gb_clf = GradientBoostingClassifier(
+    n_estimators=100,            # More trees for better performance
+    max_depth=5,                 # Shallow trees generalize better, are fast
+    learning_rate=0.08,
+    subsample=0.8                # Subsample for regularization
+)
         xgb_clf.fit(X_tr_scaled, y_tr)
         lgb_clf.fit(X_tr_scaled, y_tr)
         cat_clf.fit(X_tr_scaled, y_tr)
         gb_clf.fit(X_tr_scaled, y_tr)
         rf_clf.fit(X_tr_scaled, y_tr)
         lr_clf.fit(X_tr_scaled, y_tr)
+
         val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+        # Duplicate for 8 models in arrays (compatibility)
+        val_fold_probas[va_idx, 6] = rf_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 7] = lr_clf.predict_proba(X_va_scaled)[:, 1]
         test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 3] += gb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 4] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
         test_fold_probas[:, 5] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 6] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 7] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
 
-        # Optional: SHAP for XGB (first fold only)
+        # SHAP (optional)
         if fold == 0 and show_shap:
             with st.spinner("Computing SHAP values (this can be slow)..."):
                 explainer = shap.TreeExplainer(xgb_clf)
@@ -356,11 +451,11 @@ if event_file is not None and today_file is not None:
         est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
         st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
 
-    # Blend all model outputs (simple mean for robust ensemble)
+    # Bagged predictions
     y_val_bag = val_fold_probas.mean(axis=1)
     y_today_bag = test_fold_probas.mean(axis=1)
 
-    # ========== OOS TEST ==========
+    # ====== OOS TEST =======
     with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 2,000 rows..."):
         scaler_oos = StandardScaler()
         X_oos_train_scaled = scaler_oos.fit_transform(X_train)
@@ -396,9 +491,14 @@ if event_file is not None and today_file is not None:
     ir = IsotonicRegression(out_of_bounds="clip")
     y_val_iso = ir.fit_transform(y_val_bag, y_train)
     y_today_iso = ir.transform(y_today_bag)
-    # === Blended calibration ===
     y_val_blend = 0.5 * y_val_beta + 0.5 * y_val_iso
     y_today_blend = 0.5 * y_today_beta + 0.5 * y_today_iso
+
+    # ---- ADD WEATHER RATINGS ----
+    today_df = today_df.copy()
+    ratings_df = today_df.apply(rate_weather, axis=1)
+    for col in ratings_df.columns:
+        today_df[col] = ratings_df[col]
 
     # --- Leaderboard logic for ALL calibrations ---
     def build_leaderboard(df, hr_probs, label="calibrated_hr_probability"):
@@ -406,21 +506,6 @@ if event_file is not None and today_file is not None:
         df[label] = hr_probs
         df = df.sort_values(label, ascending=False).reset_index(drop=True)
         df['hr_base_rank'] = df[label].rank(method='min', ascending=False)
-        df['sticky_hr_boost'] = stickiness_rank_boost(df, top_k=10, stickiness_boost=0.19, prev_rank_col=None, hr_col=label)
-        df['prob_gap_prev'] = df[label].diff().fillna(0)
-        df['prob_gap_next'] = df[label].shift(-1) - df[label]
-        df['prob_gap_next'] = df['prob_gap_next'].fillna(0)
-        df['is_top_10_pred'] = (df.index < 10).astype(int)
-        meta_pseudo_y = df['sticky_hr_boost'].copy()
-        meta_pseudo_y.iloc[:10] = meta_pseudo_y.iloc[:10] + 0.18
-        meta_features = ['sticky_hr_boost', 'prob_gap_prev', 'prob_gap_next', 'is_top_10_pred']
-        from sklearn.ensemble import GradientBoostingRegressor
-        meta_booster = GradientBoostingRegressor(n_estimators=90, max_depth=3, learning_rate=0.13)
-        X_meta = df[meta_features].values
-        y_meta = meta_pseudo_y.values
-        meta_booster.fit(X_meta, y_meta)
-        df['meta_hr_rank_score'] = meta_booster.predict(X_meta)
-        df = df.sort_values("meta_hr_rank_score", ascending=False).reset_index(drop=True)
         if any([k in df.columns for k in ["wind_mph", "temp", "humidity", "park_hr_rate"]]):
             df['overlay_multiplier'] = df.apply(overlay_multiplier, axis=1)
             df['final_hr_probability'] = (df[label] * df['overlay_multiplier']).clip(0, 1)
@@ -429,24 +514,28 @@ if event_file is not None and today_file is not None:
             df['final_hr_probability'] = df[label]
             sort_col = "final_hr_probability"
         leaderboard_cols = []
-        if "player_name" in df.columns:
-            leaderboard_cols.append("player_name")
-        leaderboard_cols += [label, "final_hr_probability", "meta_hr_rank_score"]
+        # Always include team_code and time!
+        for c in ["player_name", "team_code", "time"]:
+            if c in df.columns: leaderboard_cols.append(c)
+        leaderboard_cols += [
+            label, "final_hr_probability",
+            "temp", "temp_rating",
+            "humidity", "humidity_rating",
+            "wind_mph", "wind_rating",
+            "wind_dir_string", "condition", "condition_rating"
+        ]
         if 'overlay_multiplier' in df.columns:
             leaderboard_cols.append('overlay_multiplier')
         leaderboard = df[leaderboard_cols].sort_values(sort_col, ascending=False).reset_index(drop=True)
         leaderboard[label] = leaderboard[label].round(4)
         leaderboard["final_hr_probability"] = leaderboard["final_hr_probability"].round(4)
-        leaderboard["meta_hr_rank_score"] = leaderboard["meta_hr_rank_score"].round(4)
         if 'overlay_multiplier' in leaderboard.columns:
             leaderboard['overlay_multiplier'] = leaderboard['overlay_multiplier'].round(3)
-        return leaderboard, sort_col, meta_features, meta_booster
+        return leaderboard, sort_col
 
-    leaderboard_beta, sort_col_beta, meta_features, meta_booster_beta = build_leaderboard(today_df, y_today_beta, "hr_probability_beta")
-    leaderboard_iso, sort_col_iso, meta_features, meta_booster_iso = build_leaderboard(today_df, y_today_iso, "hr_probability_iso")
-    leaderboard_blend, sort_col_blend, meta_features, meta_booster_blend = build_leaderboard(today_df, y_today_blend, "hr_probability_blend")
+    leaderboard_blend, sort_col_blend = build_leaderboard(today_df, y_today_blend, "hr_probability_blend")
 
-    # Download and display for ALL leaderboards
+    # Download and display for Blend leaderboard only
     top_n = 30
     st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (Blended BetaCal/Isotonic)**")
     leaderboard_top_blend = leaderboard_blend.head(top_n)
@@ -457,65 +546,22 @@ if event_file is not None and today_file is not None:
         file_name=f"top{top_n}_leaderboard_blend.csv"
     )
 
-    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (BetaCalibration)**")
-    leaderboard_top_beta = leaderboard_beta.head(top_n)
-    st.dataframe(leaderboard_top_beta, use_container_width=True)
-    st.download_button(
-        f"⬇️ Download Top {top_n} Leaderboard (BetaCalibration) CSV",
-        data=leaderboard_top_beta.to_csv(index=False),
-        file_name=f"top{top_n}_leaderboard_beta.csv"
-    )
-
-    st.markdown(f"### 🏆 **Top {top_n} HR Leaderboard (Isotonic)**")
-    leaderboard_top_iso = leaderboard_iso.head(top_n)
-    st.dataframe(leaderboard_top_iso, use_container_width=True)
-    st.download_button(
-        f"⬇️ Download Top {top_n} Leaderboard (Isotonic) CSV",
-        data=leaderboard_top_iso.to_csv(index=False),
-        file_name=f"top{top_n}_leaderboard_iso.csv"
-    )
-
     # Download full predictions
     st.download_button(
         "⬇️ Download Full Prediction CSV (Blend)",
         data=leaderboard_blend.to_csv(index=False),
         file_name="today_hr_predictions_full_blend.csv"
     )
-    st.download_button(
-        "⬇️ Download Full Prediction CSV (BetaCalibration)",
-        data=leaderboard_beta.to_csv(index=False),
-        file_name="today_hr_predictions_full_beta.csv"
-    )
-    st.download_button(
-        "⬇️ Download Full Prediction CSV (Isotonic)",
-        data=leaderboard_iso.to_csv(index=False),
-        file_name="today_hr_predictions_full_iso.csv"
-    )
 
     # Leaderboard plots
-    for name, lb, sort_col, booster in [
-        ("Blend", leaderboard_top_blend, sort_col_blend, meta_booster_blend),
-        ("BetaCalibration", leaderboard_top_beta, sort_col_beta, meta_booster_beta),
-        ("Isotonic", leaderboard_top_iso, sort_col_iso, meta_booster_iso)
-    ]:
-        if "player_name" in lb.columns:
-            st.subheader(f"📊 HR Probability Distribution (Top 30, {name})")
-            fig, ax = plt.subplots(figsize=(10, 7))
-            ax.barh(lb["player_name"].astype(str), lb[sort_col], color='royalblue')
-            ax.invert_yaxis()
-            ax.set_xlabel('Predicted HR Probability')
-            ax.set_ylabel('Player')
-            st.pyplot(fig)
-
-        # Meta-Ranker Feature Importance
-        st.subheader(f"🔎 Meta-Ranker Feature Importance ({name})")
-        importances = pd.Series(booster.feature_importances_, index=meta_features)
-        st.dataframe(importances.sort_values(ascending=False).to_frame("importance"))
-
-        if lb.isna().any().any():
-            st.warning("⚠️ NaNs detected in leaderboard! Double-check the input features.")
-        if (lb[sort_col] < 0).any() or (lb[sort_col] > 1).any():
-            st.warning("⚠️ Some final probabilities are out of [0,1] range!")
+    if "player_name" in leaderboard_top_blend.columns:
+        st.subheader(f"📊 HR Probability Distribution (Top 30, Blend)")
+        fig, ax = plt.subplots(figsize=(10, 7))
+        ax.barh(leaderboard_top_blend["player_name"].astype(str), leaderboard_top_blend[sort_col_blend], color='royalblue')
+        ax.invert_yaxis()
+        ax.set_xlabel('Predicted HR Probability')
+        ax.set_ylabel('Player')
+        st.pyplot(fig)
 
     # Drift diagnostics
     drifted = drift_check(X, X_today, n=6)
@@ -523,19 +569,14 @@ if event_file is not None and today_file is not None:
         st.markdown("#### ⚡ **Feature Drift Diagnostics**")
         st.write("These features have unusual mean/std changes between training and today, check if input context shifted:", drifted)
 
-    # Extra: Show prediction histogram (full today set, all calibrations)
-    for name, lb, sort_col in [
-        ("Blend", leaderboard_blend, sort_col_blend),
-        ("BetaCalibration", leaderboard_beta, sort_col_beta),
-        ("Isotonic", leaderboard_iso, sort_col_iso)
-    ]:
-        st.subheader(f"Prediction Probability Distribution (all predictions, {name})")
-        plt.figure(figsize=(8, 3))
-        plt.hist(lb[sort_col], bins=30, color='orange', alpha=0.7)
-        plt.xlabel("Final HR Probability")
-        plt.ylabel("Count")
-        st.pyplot(plt.gcf())
-        plt.close()
+    # Extra: Show prediction histogram (full today set, blend only)
+    st.subheader(f"Prediction Probability Distribution (all predictions, Blend)")
+    plt.figure(figsize=(8, 3))
+    plt.hist(leaderboard_blend[sort_col_blend], bins=30, color='orange', alpha=0.7)
+    plt.xlabel("Final HR Probability")
+    plt.ylabel("Count")
+    st.pyplot(plt.gcf())
+    plt.close()
 
     # Memory cleanup
     del X, X_today, y, val_fold_probas, test_fold_probas, y_train, y_oos, X_train, X_oos
