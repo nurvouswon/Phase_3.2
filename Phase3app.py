@@ -94,53 +94,97 @@ def feature_debug(X):
 
 # --- UPGRADED Overlay Multiplier Logic ---
 def overlay_multiplier(row):
-    multiplier = 1.0
-    # --- Wind Logic: Direction and Strength ---
-    wind_col = 'wind_mph'
-    wind_dir_col = 'wind_dir_string'
-    wind = row.get(wind_col, np.nan)
-    wind_dir = str(row.get(wind_dir_col, '')).lower()
-    # Only strong wind triggers boost/fade
-    if pd.notnull(wind) and wind >= 10:
+    """
+    Cutting-edge wind × batted ball × pitcher × handedness overlay logic.
+    - Uses batter pull_rate, oppo_rate, fb_rate (if present)
+    - Uses pitcher gb_rate, fb_rate (if present)
+    - Full direction parsing for wind_dir_string ("rf", "lf", "cf", etc.)
+    - Uses batter hand ("stand" or "batter_hand")
+    - Handles side-to-side wind as neutral
+    - Returns robust HR boost/fade, max accuracy
+    """
+    edge = 1.0
+
+    # Wind context
+    wind = row.get("wind_mph", np.nan)
+    wind_dir = str(row.get("wind_dir_string", "")).lower().strip()
+    if pd.isnull(wind): wind = 0
+
+    # Batted ball profile
+    b_pull = row.get("pull_rate", np.nan)
+    b_oppo = row.get("oppo_rate", np.nan)
+    b_fb = row.get("fb_rate", np.nan)
+    hand = str(row.get('stand', row.get('batter_hand', ''))).upper()
+    if not hand or hand == "NAN":
+        hand = "R"  # Default to R if missing
+
+    # Pitcher profile
+    p_gb = row.get("p_gb_rate", row.get("gb_rate", np.nan))
+    p_fb = row.get("p_fb_rate", row.get("fb_rate", np.nan))
+
+    # --- Wind logic (directional and contextual) ---
+    def apply_wind_bonus(factor, cond):
+        nonlocal edge
+        if cond:
+            edge *= factor
+
+    # Only wind >= 7 triggers effect
+    if wind >= 7 and isinstance(wind_dir, str) and wind_dir and wind_dir != "nan":
+        # Out
         if "out" in wind_dir or "o" in wind_dir:
             if "rf" in wind_dir:
-                multiplier *= 1.08
-            elif "lf" in wind_dir:
-                multiplier *= 1.08
-            elif "cf" in wind_dir:
-                multiplier *= 1.08
-            else:
-                multiplier *= 1.08
+                apply_wind_bonus(1.10, hand == "R" and b_oppo is not np.nan and b_oppo > 0.28)  # Oppo RHH to RF
+                apply_wind_bonus(1.13, hand == "L" and b_pull is not np.nan and b_pull > 0.37)  # Pull LHH to RF
+            if "lf" in wind_dir:
+                apply_wind_bonus(1.13, hand == "R" and b_pull is not np.nan and b_pull > 0.37)  # Pull RHH to LF
+                apply_wind_bonus(1.10, hand == "L" and b_oppo is not np.nan and b_oppo > 0.28)  # Oppo LHH to LF
+            if "cf" in wind_dir:
+                apply_wind_bonus(1.06, b_fb is not np.nan and b_fb > 0.22)
+        # In
         elif "in" in wind_dir or "i" in wind_dir:
             if "rf" in wind_dir:
-                multiplier *= 0.93
-            elif "lf" in wind_dir:
-                multiplier *= 0.93
-            elif "cf" in wind_dir:
-                multiplier *= 0.93
-            else:
-                multiplier *= 0.93
-        # If neither out/in (side to side), neutral multiplier
+                apply_wind_bonus(0.91, hand == "R" and b_oppo is not np.nan and b_oppo > 0.28)
+                apply_wind_bonus(0.88, hand == "L" and b_pull is not np.nan and b_pull > 0.37)
+            if "lf" in wind_dir:
+                apply_wind_bonus(0.88, hand == "R" and b_pull is not np.nan and b_pull > 0.37)
+                apply_wind_bonus(0.91, hand == "L" and b_oppo is not np.nan and b_oppo > 0.28)
+            if "cf" in wind_dir:
+                apply_wind_bonus(0.93, b_fb is not np.nan and b_fb > 0.22)
+
+        # Strong flyball pitcher gets boost for out, fade for in
+        if p_fb is not np.nan and p_fb > 0.24:
+            if "out" in wind_dir or "o" in wind_dir:
+                edge *= 1.05
+            elif "in" in wind_dir or "i" in wind_dir:
+                edge *= 0.97
+
+        # Heavy groundball pitcher: fade a little for both
+        if p_gb is not np.nan and p_gb > 0.49:
+            edge *= 0.97
+
+    # --- Side wind: no change
+    # --- Weak wind: no change
+
     # --- Temperature logic ---
-    temp_col = 'temp'
-    if temp_col in row and pd.notnull(row[temp_col]):
-        base_temp = 70
-        delta = row[temp_col] - base_temp
-        multiplier *= 1.03 ** (delta / 10)
+    temp = row.get("temp", np.nan)
+    if pd.notnull(temp):
+        edge *= 1.03 ** ((temp - 70) / 10)
+
     # --- Humidity logic ---
-    humidity_col = 'humidity'
-    if humidity_col in row and pd.notnull(row[humidity_col]):
-        hum = row[humidity_col]
-        if hum > 60:
-            multiplier *= 1.02
-        elif hum < 40:
-            multiplier *= 0.98
+    humidity = row.get("humidity", np.nan)
+    if pd.notnull(humidity):
+        if humidity > 60:
+            edge *= 1.02
+        elif humidity < 40:
+            edge *= 0.98
+
     # --- Park HR Rate logic ---
     park_hr_col = 'park_hr_rate'
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.85, min(1.20, float(row[park_hr_col])))
-        multiplier *= pf
-    return multiplier
+        edge *= pf
+
+    return float(np.clip(edge, 0.75, 1.33))  # Limit to prevent outlier multipliers
 
 # --- UPGRADED Weather Rating Helper ---
 def rate_weather(row):
