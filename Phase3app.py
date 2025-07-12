@@ -92,66 +92,39 @@ def feature_debug(X):
             st.write(f"Column {col} is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
-# === UPGRADED OVERLAY MULTIPLIER ===
 def overlay_multiplier(row):
     multiplier = 1.0
     wind_col = 'wind_mph'
     wind_dir_col = 'wind_dir_string'
-    bb_pull_col = [c for c in row.index if "pull_rate" in c and c.startswith("b_")]
-    bb_fb_col = [c for c in row.index if "fb_rate" in c and c.startswith("b_")]
-    batter_side = str(row.get('stand', '')).upper()
-    # Wind: use wind direction + pull/FB profile
-    wind = row.get(wind_col, np.nan)
-    wind_dir = str(row.get(wind_dir_col, "") or "").lower()
-    if pd.isnull(wind_dir) or wind_dir in ("nan", "", "none"): wind_dir = "unk"
-    if pd.notnull(wind) and wind >= 10 and wind_dir != "unk":
-        # Assume classic "O RF"/"I CF" parsing, look for OUT/IN + RF/CF/LF
-        out = 'out' in wind_dir
-        inw = 'in' in wind_dir
-        rf = 'rf' in wind_dir
-        lf = 'lf' in wind_dir
-        cf = 'cf' in wind_dir
-        # Directional wind "edge" based on batter hand and batted ball profile
-        pull_rate = np.nan
-        fb_rate = np.nan
-        if bb_pull_col: pull_rate = float(row[bb_pull_col[0]])
-        if bb_fb_col: fb_rate = float(row[bb_fb_col[0]])
-        # Righty, wind out RF (oppo)? Or wind out LF (pull)? Use pull tendency
-        if batter_side == "R":
-            if out and rf and pull_rate < 0.33:  # oppo
+    # --- Enhanced wind direction multiplier ---
+    if wind_col in row and wind_dir_col in row:
+        wind = row[wind_col]
+        wind_dir = str(row[wind_dir_col]).lower()
+        # Always handle missing or NaN wind_dir
+        if pd.isnull(wind_dir) or wind_dir.strip() == "" or wind_dir.lower() in {"nan", "none"}:
+            wind_dir = ""
+        if pd.notnull(wind) and wind >= 8:
+            if ('out' in wind_dir and 'cf' in wind_dir) or 'out cf' in wind_dir or 'cf out' in wind_dir:
                 multiplier *= 1.09
-            elif out and lf and pull_rate > 0.4:  # pull
-                multiplier *= 1.12
-            elif inw and lf and pull_rate > 0.4:
-                multiplier *= 0.92
-            elif inw and rf and pull_rate < 0.33:
+            elif 'out' in wind_dir and 'rf' in wind_dir:
+                multiplier *= 1.07
+            elif 'out' in wind_dir and 'lf' in wind_dir:
+                multiplier *= 1.07
+            elif 'out' in wind_dir:
+                multiplier *= 1.05
+            elif 'in' in wind_dir and 'cf' in wind_dir:
+                multiplier *= 0.91
+            elif 'in' in wind_dir and 'rf' in wind_dir:
                 multiplier *= 0.94
-        elif batter_side == "L":
-            if out and lf and pull_rate < 0.33:
-                multiplier *= 1.09
-            elif out and rf and pull_rate > 0.4:
-                multiplier *= 1.12
-            elif inw and rf and pull_rate > 0.4:
-                multiplier *= 0.92
-            elif inw and lf and pull_rate < 0.33:
+            elif 'in' in wind_dir and 'lf' in wind_dir:
                 multiplier *= 0.94
-        # If FB hitter and wind out CF: boost
-        if out and cf and fb_rate > 0.4:
-            multiplier *= 1.05
-        if inw and cf and fb_rate > 0.4:
-            multiplier *= 0.97
-        # Fallback if classic wind
-        if out and not (lf or rf or cf):
-            multiplier *= 1.06
-        elif inw and not (lf or rf or cf):
-            multiplier *= 0.93
-    # Temp
+            elif 'in' in wind_dir:
+                multiplier *= 0.93
     temp_col = 'temp'
     if temp_col in row and pd.notnull(row[temp_col]):
         base_temp = 70
         delta = row[temp_col] - base_temp
         multiplier *= 1.03 ** (delta / 10)
-    # Humidity
     humidity_col = 'humidity'
     if humidity_col in row and pd.notnull(row[humidity_col]):
         hum = row[humidity_col]
@@ -159,12 +132,78 @@ def overlay_multiplier(row):
             multiplier *= 1.02
         elif hum < 40:
             multiplier *= 0.98
-    # Park HR Rate
     park_hr_col = 'park_hr_rate'
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.85, min(1.20, float(row[park_hr_col])))
         multiplier *= pf
     return multiplier
+
+def drift_check(train, today, n=5):
+    drifted = []
+    for c in train.columns:
+        if c not in today.columns: continue
+        tmean = np.nanmean(train[c])
+        tstd = np.nanstd(train[c])
+        dmean = np.nanmean(today[c])
+        if tstd > 0 and abs(tmean - dmean) / tstd > n:
+            drifted.append(c)
+    return drifted
+
+def winsorize_clip(X, limits=(0.01, 0.99)):
+    X = X.astype(float)
+    for col in X.columns:
+        lower = X[col].quantile(limits[0])
+        upper = X[col].quantile(limits[1])
+        X[col] = X[col].clip(lower=lower, upper=upper)
+    return X
+
+def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=None, hr_col='hr_probability'):
+    stick = df[hr_col].copy()
+    if prev_rank_col and prev_rank_col in df.columns:
+        prev_rank = df[prev_rank_col].rank(method='min', ascending=False)
+        stick = stick + stickiness_boost * (prev_rank <= top_k)
+    else:
+        stick.iloc[:top_k] += stickiness_boost
+    return stick
+
+def auto_feature_crosses(X, max_cross=24, template_cols=None):
+    cross_names = []
+    if template_cols is not None:
+        for name in template_cols:
+            f1, f2 = name.split('*')
+            X[name] = X[f1] * X[f2]
+            cross_names.append(name)
+        X = X.copy()
+        return X, cross_names
+    means = X.mean()
+    var_scores = {}
+    cols = list(X.columns)
+    for i, f1 in enumerate(cols):
+        for j, f2 in enumerate(cols):
+            if i >= j: continue
+            cross = X[f1] * X[f2]
+            var_scores[(f1, f2)] = cross.var()
+    top_pairs = sorted(var_scores.items(), key=lambda kv: -kv[1])[:max_cross]
+    for (f1, f2), _ in top_pairs:
+        name = f"{f1}*{f2}"
+        X[name] = X[f1] * X[f2]
+        cross_names.append(name)
+    X = X.copy()
+    return X, cross_names
+
+def remove_outliers(X, y, method="iforest", contamination=0.012):
+    if method == "iforest":
+        mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
+    else:
+        mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
+    return X[mask], y[mask]
+
+def smooth_labels(y, smoothing=0.02):
+    y = np.asarray(y)
+    y_smooth = y.copy().astype(float)
+    y_smooth[y == 1] = 1 - smoothing
+    y_smooth[y == 0] = smoothing
+    return y_smooth
 
 # --------- Weather Rating Helper ---------
 def rate_weather(row):
@@ -217,7 +256,9 @@ def rate_weather(row):
         ratings["condition_rating"] = "Fair"
     return pd.Series(ratings)
 
-    event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
+# ---- APP START ----
+
+event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
 if event_file is not None and today_file is not None:
@@ -340,13 +381,12 @@ if event_file is not None and today_file is not None:
         X_today_scaled = sc.transform(X_today)
 
         # --- Optimized Tree Model Instantiations ---
-
         xgb_clf = xgb.XGBClassifier(
-            n_estimators=120,             # More estimators for accuracy, still fast
-            max_depth=6,                  # Lower depth to prevent overfit and keep speed
-            learning_rate=0.07,           # Slightly lower learning rate for stability
-            subsample=0.8,                # Adds regularization, slightly faster
-            colsample_bytree=0.8,         # Randomness, regularization
+            n_estimators=120,
+            max_depth=6,
+            learning_rate=0.07,
+            subsample=0.8,
+            colsample_bytree=0.8,
             use_label_encoder=False,
             eval_metric='logloss',
             n_jobs=1,
@@ -436,6 +476,9 @@ if event_file is not None and today_file is not None:
     # Bagged predictions
     y_val_bag = val_fold_probas.mean(axis=1)
     y_today_bag = test_fold_probas.mean(axis=1)
+    # Bagged predictions
+    y_val_bag = val_fold_probas.mean(axis=1)
+    y_today_bag = test_fold_probas.mean(axis=1)
 
     # ====== OOS TEST =======
     with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 2,000 rows..."):
@@ -463,6 +506,7 @@ if event_file is not None and today_file is not None:
         oos_auc = roc_auc_score(y_oos, oos_probs)
         oos_logloss = log_loss(y_oos, oos_probs)
         st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
+
     # ==== OOS: Calibrated Model Performance Display ====
     st.markdown("### 📊 OOS Calibrated Model Performance (BetaCalibration, Isotonic, Blend)")
 
@@ -592,6 +636,5 @@ if event_file is not None and today_file is not None:
     # Memory cleanup
     del X, X_today, y, val_fold_probas, test_fold_probas, y_train, y_oos, X_train, X_oos
     gc.collect()
-
 else:
     st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
