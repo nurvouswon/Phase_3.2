@@ -92,23 +92,42 @@ def feature_debug(X):
             st.write(f"Column {col} is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
+# --- UPGRADED Overlay Multiplier Logic ---
 def overlay_multiplier(row):
     multiplier = 1.0
+    # --- Wind Logic: Direction and Strength ---
     wind_col = 'wind_mph'
     wind_dir_col = 'wind_dir_string'
-    if wind_col in row and wind_dir_col in row:
-        wind = row[wind_col]
-        wind_dir = str(row[wind_dir_col]).lower()
-        if pd.notnull(wind) and wind >= 10:
-            if 'out' in wind_dir:
+    wind = row.get(wind_col, np.nan)
+    wind_dir = str(row.get(wind_dir_col, '')).lower()
+    # Only strong wind triggers boost/fade
+    if pd.notnull(wind) and wind >= 10:
+        if "out" in wind_dir or "o" in wind_dir:
+            if "rf" in wind_dir:
                 multiplier *= 1.08
-            elif 'in' in wind_dir:
+            elif "lf" in wind_dir:
+                multiplier *= 1.08
+            elif "cf" in wind_dir:
+                multiplier *= 1.08
+            else:
+                multiplier *= 1.08
+        elif "in" in wind_dir or "i" in wind_dir:
+            if "rf" in wind_dir:
                 multiplier *= 0.93
+            elif "lf" in wind_dir:
+                multiplier *= 0.93
+            elif "cf" in wind_dir:
+                multiplier *= 0.93
+            else:
+                multiplier *= 0.93
+        # If neither out/in (side to side), neutral multiplier
+    # --- Temperature logic ---
     temp_col = 'temp'
     if temp_col in row and pd.notnull(row[temp_col]):
         base_temp = 70
         delta = row[temp_col] - base_temp
         multiplier *= 1.03 ** (delta / 10)
+    # --- Humidity logic ---
     humidity_col = 'humidity'
     if humidity_col in row and pd.notnull(row[humidity_col]):
         hum = row[humidity_col]
@@ -116,11 +135,74 @@ def overlay_multiplier(row):
             multiplier *= 1.02
         elif hum < 40:
             multiplier *= 0.98
+    # --- Park HR Rate logic ---
     park_hr_col = 'park_hr_rate'
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.85, min(1.20, float(row[park_hr_col])))
         multiplier *= pf
     return multiplier
+
+# --- UPGRADED Weather Rating Helper ---
+def rate_weather(row):
+    ratings = {}
+    # Temperature
+    temp = row.get("temp", np.nan)
+    if pd.isna(temp):
+        ratings["temp_rating"] = "?"
+    elif 68 <= temp <= 85:
+        ratings["temp_rating"] = "Excellent"
+    elif 60 <= temp < 68 or 85 < temp <= 92:
+        ratings["temp_rating"] = "Good"
+    elif 50 <= temp < 60 or 92 < temp <= 98:
+        ratings["temp_rating"] = "Fair"
+    else:
+        ratings["temp_rating"] = "Poor"
+    # Humidity
+    humidity = row.get("humidity", np.nan)
+    if pd.isna(humidity):
+        ratings["humidity_rating"] = "?"
+    elif 45 <= humidity <= 65:
+        ratings["humidity_rating"] = "Excellent"
+    elif 30 <= humidity < 45 or 65 < humidity <= 80:
+        ratings["humidity_rating"] = "Good"
+    elif 15 <= humidity < 30 or 80 < humidity <= 90:
+        ratings["humidity_rating"] = "Fair"
+    else:
+        ratings["humidity_rating"] = "Poor"
+    # Wind MPH + Wind Directionality
+    wind = row.get("wind_mph", np.nan)
+    wind_dir = str(row.get("wind_dir_string", "")).lower()
+    if pd.isna(wind):
+        ratings["wind_rating"] = "?"
+    elif wind < 6:
+        ratings["wind_rating"] = "Excellent"
+    elif 6 <= wind < 12:
+        ratings["wind_rating"] = "Good"
+    elif 12 <= wind < 18:
+        if "out" in wind_dir:
+            ratings["wind_rating"] = "Good"
+        elif "in" in wind_dir:
+            ratings["wind_rating"] = "Fair"
+        else:
+            ratings["wind_rating"] = "Fair"
+    else:
+        if "out" in wind_dir:
+            ratings["wind_rating"] = "Fair"
+        elif "in" in wind_dir:
+            ratings["wind_rating"] = "Poor"
+        else:
+            ratings["wind_rating"] = "Poor"
+    # Condition
+    condition = str(row.get("condition", "")).lower()
+    if "clear" in condition or "sun" in condition or "outdoor" in condition:
+        ratings["condition_rating"] = "Excellent"
+    elif "cloud" in condition or "partly" in condition:
+        ratings["condition_rating"] = "Good"
+    elif "rain" in condition or "fog" in condition:
+        ratings["condition_rating"] = "Poor"
+    else:
+        ratings["condition_rating"] = "Fair"
+    return pd.Series(ratings)
 
 def drift_check(train, today, n=5):
     drifted = []
@@ -188,68 +270,6 @@ def smooth_labels(y, smoothing=0.02):
     y_smooth[y == 1] = 1 - smoothing
     y_smooth[y == 0] = smoothing
     return y_smooth
-
-# --------- Weather Rating Helper ---------
-def rate_weather(row):
-    ratings = {}
-    # Temperature
-    temp = row.get("temp", np.nan)
-    if pd.isna(temp):
-        ratings["temp_rating"] = "?"
-    elif 68 <= temp <= 85:
-        ratings["temp_rating"] = "Excellent"
-    elif 60 <= temp < 68 or 85 < temp <= 92:
-        ratings["temp_rating"] = "Good"
-    elif 50 <= temp < 60 or 92 < temp <= 98:
-        ratings["temp_rating"] = "Fair"
-    else:
-        ratings["temp_rating"] = "Poor"
-    # Humidity
-    humidity = row.get("humidity", np.nan)
-    if pd.isna(humidity):
-        ratings["humidity_rating"] = "?"
-    elif 45 <= humidity <= 65:
-        ratings["humidity_rating"] = "Excellent"
-    elif 30 <= humidity < 45 or 65 < humidity <= 80:
-        ratings["humidity_rating"] = "Good"
-    elif 15 <= humidity < 30 or 80 < humidity <= 90:
-        ratings["humidity_rating"] = "Fair"
-    else:
-        ratings["humidity_rating"] = "Poor"
-    # Wind MPH + Wind Directionality
-    wind = row.get("wind_mph", np.nan)
-    wind_dir = str(row.get("wind_dir_string", "")).lower()
-    if pd.isna(wind):
-        ratings["wind_rating"] = "?"
-    elif wind < 6:
-        ratings["wind_rating"] = "Excellent"
-    elif 6 <= wind < 12:
-        ratings["wind_rating"] = "Good"
-    elif 12 <= wind < 18:
-        if "out" in wind_dir:
-            ratings["wind_rating"] = "Good"
-        elif "in" in wind_dir:
-            ratings["wind_rating"] = "Fair"
-        else:
-            ratings["wind_rating"] = "Fair"
-    else:
-        if "out" in wind_dir:
-            ratings["wind_rating"] = "Fair"
-        elif "in" in wind_dir:
-            ratings["wind_rating"] = "Poor"
-        else:
-            ratings["wind_rating"] = "Poor"
-    # Condition
-    condition = str(row.get("condition", "")).lower()
-    if "clear" in condition or "sun" in condition or "outdoor" in condition:
-        ratings["condition_rating"] = "Excellent"
-    elif "cloud" in condition or "partly" in condition:
-        ratings["condition_rating"] = "Good"
-    elif "rain" in condition or "fog" in condition:
-        ratings["condition_rating"] = "Poor"
-    else:
-        ratings["condition_rating"] = "Fair"
-    return pd.Series(ratings)
 
 # ---- APP START ----
 
@@ -354,7 +374,7 @@ if event_file is not None and today_file is not None:
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 2
+    n_splits = 9
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
