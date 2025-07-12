@@ -92,161 +92,35 @@ def feature_debug(X):
             st.write(f"Column {col} is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
-# --- UPGRADED Overlay Multiplier Logic ---
 def overlay_multiplier(row):
-    """
-    Cutting-edge wind × batted ball × pitcher × handedness overlay logic.
-    - Uses batter pull_rate, oppo_rate, fb_rate (if present)
-    - Uses pitcher gb_rate, fb_rate (if present)
-    - Full direction parsing for wind_dir_string ("rf", "lf", "cf", etc.)
-    - Uses batter hand ("stand" or "batter_hand")
-    - Handles side-to-side wind as neutral
-    - Returns robust HR boost/fade, max accuracy
-    """
-    edge = 1.0
-
-    # Wind context
-    wind = row.get("wind_mph", np.nan)
-    wind_dir = str(row.get("wind_dir_string", "")).lower().strip()
-    if pd.isnull(wind): wind = 0
-
-    # Batted ball profile
-    b_pull = row.get("pull_rate", np.nan)
-    b_oppo = row.get("oppo_rate", np.nan)
-    b_fb = row.get("fb_rate", np.nan)
-    hand = str(row.get('stand', row.get('batter_hand', ''))).upper()
-    if not hand or hand == "NAN":
-        hand = "R"  # Default to R if missing
-
-    # Pitcher profile
-    p_gb = row.get("p_gb_rate", row.get("gb_rate", np.nan))
-    p_fb = row.get("p_fb_rate", row.get("fb_rate", np.nan))
-
-    # --- Wind logic (directional and contextual) ---
-    def apply_wind_bonus(factor, cond):
-        nonlocal edge
-        if cond:
-            edge *= factor
-
-    # Only wind >= 7 triggers effect
-    if wind >= 7 and isinstance(wind_dir, str) and wind_dir and wind_dir != "nan":
-        # Out
-        if "out" in wind_dir or "o" in wind_dir:
-            if "rf" in wind_dir:
-                apply_wind_bonus(1.10, hand == "R" and b_oppo is not np.nan and b_oppo > 0.28)  # Oppo RHH to RF
-                apply_wind_bonus(1.13, hand == "L" and b_pull is not np.nan and b_pull > 0.37)  # Pull LHH to RF
-            if "lf" in wind_dir:
-                apply_wind_bonus(1.13, hand == "R" and b_pull is not np.nan and b_pull > 0.37)  # Pull RHH to LF
-                apply_wind_bonus(1.10, hand == "L" and b_oppo is not np.nan and b_oppo > 0.28)  # Oppo LHH to LF
-            if "cf" in wind_dir:
-                apply_wind_bonus(1.06, b_fb is not np.nan and b_fb > 0.22)
-        # In
-        elif "in" in wind_dir or "i" in wind_dir:
-            if "rf" in wind_dir:
-                apply_wind_bonus(0.91, hand == "R" and b_oppo is not np.nan and b_oppo > 0.28)
-                apply_wind_bonus(0.88, hand == "L" and b_pull is not np.nan and b_pull > 0.37)
-            if "lf" in wind_dir:
-                apply_wind_bonus(0.88, hand == "R" and b_pull is not np.nan and b_pull > 0.37)
-                apply_wind_bonus(0.91, hand == "L" and b_oppo is not np.nan and b_oppo > 0.28)
-            if "cf" in wind_dir:
-                apply_wind_bonus(0.93, b_fb is not np.nan and b_fb > 0.22)
-
-        # Strong flyball pitcher gets boost for out, fade for in
-        if p_fb is not np.nan and p_fb > 0.24:
-            if "out" in wind_dir or "o" in wind_dir:
-                edge *= 1.05
-            elif "in" in wind_dir or "i" in wind_dir:
-                edge *= 0.97
-
-        # Heavy groundball pitcher: fade a little for both
-        if p_gb is not np.nan and p_gb > 0.49:
-            edge *= 0.97
-
-    # --- Side wind: no change
-    # --- Weak wind: no change
-
-    # --- Temperature logic ---
-    temp = row.get("temp", np.nan)
-    if pd.notnull(temp):
-        edge *= 1.03 ** ((temp - 70) / 10)
-
-    # --- Humidity logic ---
-    humidity = row.get("humidity", np.nan)
-    if pd.notnull(humidity):
-        if humidity > 60:
-            edge *= 1.02
-        elif humidity < 40:
-            edge *= 0.98
-
-    # --- Park HR Rate logic ---
+    multiplier = 1.0
+    wind_col = 'wind_mph'
+    wind_dir_col = 'wind_dir_string'
+    if wind_col in row and wind_dir_col in row:
+        wind = row[wind_col]
+        wind_dir = str(row[wind_dir_col]).lower()
+        if pd.notnull(wind) and wind >= 10:
+            if 'out' in wind_dir:
+                multiplier *= 1.08
+            elif 'in' in wind_dir:
+                multiplier *= 0.93
+    temp_col = 'temp'
+    if temp_col in row and pd.notnull(row[temp_col]):
+        base_temp = 70
+        delta = row[temp_col] - base_temp
+        multiplier *= 1.03 ** (delta / 10)
+    humidity_col = 'humidity'
+    if humidity_col in row and pd.notnull(row[humidity_col]):
+        hum = row[humidity_col]
+        if hum > 60:
+            multiplier *= 1.02
+        elif hum < 40:
+            multiplier *= 0.98
     park_hr_col = 'park_hr_rate'
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.85, min(1.20, float(row[park_hr_col])))
-        edge *= pf
-
-    return float(np.clip(edge, 0.75, 1.33))  # Limit to prevent outlier multipliers
-
-# --- UPGRADED Weather Rating Helper ---
-def rate_weather(row):
-    ratings = {}
-    # Temperature
-    temp = row.get("temp", np.nan)
-    if pd.isna(temp):
-        ratings["temp_rating"] = "?"
-    elif 68 <= temp <= 85:
-        ratings["temp_rating"] = "Excellent"
-    elif 60 <= temp < 68 or 85 < temp <= 92:
-        ratings["temp_rating"] = "Good"
-    elif 50 <= temp < 60 or 92 < temp <= 98:
-        ratings["temp_rating"] = "Fair"
-    else:
-        ratings["temp_rating"] = "Poor"
-    # Humidity
-    humidity = row.get("humidity", np.nan)
-    if pd.isna(humidity):
-        ratings["humidity_rating"] = "?"
-    elif 45 <= humidity <= 65:
-        ratings["humidity_rating"] = "Excellent"
-    elif 30 <= humidity < 45 or 65 < humidity <= 80:
-        ratings["humidity_rating"] = "Good"
-    elif 15 <= humidity < 30 or 80 < humidity <= 90:
-        ratings["humidity_rating"] = "Fair"
-    else:
-        ratings["humidity_rating"] = "Poor"
-    # Wind MPH + Wind Directionality
-    wind = row.get("wind_mph", np.nan)
-    wind_dir = str(row.get("wind_dir_string", "")).lower()
-    if pd.isna(wind):
-        ratings["wind_rating"] = "?"
-    elif wind < 6:
-        ratings["wind_rating"] = "Excellent"
-    elif 6 <= wind < 12:
-        ratings["wind_rating"] = "Good"
-    elif 12 <= wind < 18:
-        if "out" in wind_dir:
-            ratings["wind_rating"] = "Good"
-        elif "in" in wind_dir:
-            ratings["wind_rating"] = "Fair"
-        else:
-            ratings["wind_rating"] = "Fair"
-    else:
-        if "out" in wind_dir:
-            ratings["wind_rating"] = "Fair"
-        elif "in" in wind_dir:
-            ratings["wind_rating"] = "Poor"
-        else:
-            ratings["wind_rating"] = "Poor"
-    # Condition
-    condition = str(row.get("condition", "")).lower()
-    if "clear" in condition or "sun" in condition or "outdoor" in condition:
-        ratings["condition_rating"] = "Excellent"
-    elif "cloud" in condition or "partly" in condition:
-        ratings["condition_rating"] = "Good"
-    elif "rain" in condition or "fog" in condition:
-        ratings["condition_rating"] = "Poor"
-    else:
-        ratings["condition_rating"] = "Fair"
-    return pd.Series(ratings)
+        multiplier *= pf
+    return multiplier
 
 def drift_check(train, today, n=5):
     drifted = []
@@ -314,6 +188,57 @@ def smooth_labels(y, smoothing=0.02):
     y_smooth[y == 1] = 1 - smoothing
     y_smooth[y == 0] = smoothing
     return y_smooth
+
+# --------- Weather Rating Helper ---------
+def rate_weather(row):
+    ratings = {}
+    # Temperature
+    temp = row.get("temp", np.nan)
+    if pd.isna(temp):
+        ratings["temp_rating"] = "?"
+    elif 68 <= temp <= 85:
+        ratings["temp_rating"] = "Excellent"
+    elif 60 <= temp < 68 or 85 < temp <= 92:
+        ratings["temp_rating"] = "Good"
+    elif 50 <= temp < 60 or 92 < temp <= 98:
+        ratings["temp_rating"] = "Fair"
+    else:
+        ratings["temp_rating"] = "Poor"
+    # Humidity
+    humidity = row.get("humidity", np.nan)
+    if pd.isna(humidity):
+        ratings["humidity_rating"] = "?"
+    elif 45 <= humidity <= 65:
+        ratings["humidity_rating"] = "Excellent"
+    elif 30 <= humidity < 45 or 65 < humidity <= 80:
+        ratings["humidity_rating"] = "Good"
+    elif 15 <= humidity < 30 or 80 < humidity <= 90:
+        ratings["humidity_rating"] = "Fair"
+    else:
+        ratings["humidity_rating"] = "Poor"
+    # Wind MPH
+    wind = row.get("wind_mph", np.nan)
+    if pd.isna(wind):
+        ratings["wind_rating"] = "?"
+    elif wind < 6:
+        ratings["wind_rating"] = "Excellent"
+    elif 6 <= wind < 12:
+        ratings["wind_rating"] = "Good"
+    elif 12 <= wind < 18:
+        ratings["wind_rating"] = "Fair"
+    else:
+        ratings["wind_rating"] = "Poor"
+    # Condition
+    condition = str(row.get("condition", "")).lower()
+    if "clear" in condition or "sun" in condition or "outdoor" in condition:
+        ratings["condition_rating"] = "Excellent"
+    elif "cloud" in condition or "partly" in condition:
+        ratings["condition_rating"] = "Good"
+    elif "rain" in condition or "fog" in condition:
+        ratings["condition_rating"] = "Poor"
+    else:
+        ratings["condition_rating"] = "Fair"
+    return pd.Series(ratings)
 
 # ---- APP START ----
 
@@ -442,11 +367,11 @@ if event_file is not None and today_file is not None:
         # --- Optimized Tree Model Instantiations ---
 
         xgb_clf = xgb.XGBClassifier(
-            n_estimators=120,
-            max_depth=6,
-            learning_rate=0.07,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            n_estimators=120,             # More estimators for accuracy, still fast
+            max_depth=6,                  # Lower depth to prevent overfit and keep speed
+            learning_rate=0.07,           # Slightly lower learning rate for stability
+            subsample=0.8,                # Adds regularization, slightly faster
+            colsample_bytree=0.8,         # Randomness, regularization
             use_label_encoder=False,
             eval_metric='logloss',
             n_jobs=1,
@@ -505,6 +430,7 @@ if event_file is not None and today_file is not None:
         val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+        # Duplicate for 8-models shape (compatibility)
         val_fold_probas[va_idx, 6] = rf_clf.predict_proba(X_va_scaled)[:, 1]
         val_fold_probas[va_idx, 7] = lr_clf.predict_proba(X_va_scaled)[:, 1]
 
@@ -562,12 +488,14 @@ if event_file is not None and today_file is not None:
         oos_auc = roc_auc_score(y_oos, oos_probs)
         oos_logloss = log_loss(y_oos, oos_probs)
         st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
-
     # ==== OOS: Calibrated Model Performance Display ====
     st.markdown("### 📊 OOS Calibrated Model Performance (BetaCalibration, Isotonic, Blend)")
 
     # -- Calibrate using validation calibrators --
     oos_val_bag = np.mean(np.column_stack(oos_preds), axis=1)
+
+    # Reuse same calibrators as above (already fitted)
+    # If not accessible, fit again as below:
 
     # BetaCalibration on OOS
     oos_bc = BetaCalibration(parameters="abm")
@@ -592,7 +520,6 @@ if event_file is not None and today_file is not None:
     st.write(f"**BetaCalibration:**   AUC = {oos_auc_beta:.4f}   |   LogLoss = {oos_logloss_beta:.4f}")
     st.write(f"**IsotonicRegression:**   AUC = {oos_auc_iso:.4f}   |   LogLoss = {oos_logloss_iso:.4f}")
     st.write(f"**Blended:**   AUC = {oos_auc_blend:.4f}   |   LogLoss = {oos_logloss_blend:.4f}")
-
     # ===== Calibration =====
     st.write("Calibrating probabilities (BetaCalibration & Isotonic & Blend)...")
     bc = BetaCalibration(parameters="abm")
@@ -694,4 +621,4 @@ if event_file is not None and today_file is not None:
     gc.collect()
 
 else:
-    st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.")
+    st.warning("Upload both event-level and today CSVs (CSV or Parquet) to begin.") 
