@@ -432,7 +432,7 @@ if event_file is not None and today_file is not None:
     X_today = winsorize_clip(X_today)
 
     # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
-    max_feats = 210
+    max_feats = 300
     variances = X.var().sort_values(ascending=False)
     top_feat_names = variances.head(max_feats).index.tolist()
     X = X[top_feat_names]
@@ -456,7 +456,7 @@ if event_file is not None and today_file is not None:
     st.write(f"Rows after outlier removal: {X.shape[0]}")
 
     # ========== OOS TEST =============
-    OOS_ROWS = 2000
+    OOS_ROWS = 5000
     X_train, X_oos = X.iloc[:-OOS_ROWS].copy(), X.iloc[-OOS_ROWS:].copy()
     y_train, y_oos = y.iloc[:-OOS_ROWS].copy(), y.iloc[-OOS_ROWS:].copy()
     st.write(f"🔒 Automatically reserving last {OOS_ROWS} rows for Out-of-Sample (OOS) test. Using first 15000 for training.")
@@ -469,7 +469,7 @@ if event_file is not None and today_file is not None:
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 4
+    n_splits = 3
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
