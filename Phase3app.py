@@ -432,7 +432,7 @@ if event_file is not None and today_file is not None:
     X_today = winsorize_clip(X_today)
 
     # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
-    max_feats = 300
+    max_feats = 400
     variances = X.var().sort_values(ascending=False)
     top_feat_names = variances.head(max_feats).index.tolist()
     X = X[top_feat_names]
