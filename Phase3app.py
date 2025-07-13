@@ -327,7 +327,7 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
-def auto_feature_crosses(X, max_cross=24, template_cols=None):
+def auto_feature_crosses(X, max_cross=32, template_cols=None):
     cross_names = []
     if template_cols is not None:
         for name in template_cols:
