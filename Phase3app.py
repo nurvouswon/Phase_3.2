@@ -432,7 +432,7 @@ if event_file is not None and today_file is not None:
     X_today = winsorize_clip(X_today)
 
     # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
-    max_feats = 500
+    max_feats = 250
     variances = X.var().sort_values(ascending=False)
     top_feat_names = variances.head(max_feats).index.tolist()
     X = X[top_feat_names]
@@ -462,14 +462,14 @@ if event_file is not None and today_file is not None:
     st.write(f"🔒 Automatically reserving last {OOS_ROWS} rows for Out-of-Sample (OOS) test. Using first 15000 for training.")
 
     # ===== Sampling for Streamlit Cloud =====
-    max_rows = 20000
+    max_rows = 15000
     if X_train.shape[0] > max_rows:
         st.warning(f"Training limited to {max_rows} rows for memory (full dataset was {X_train.shape[0]} rows).")
         X_train = X_train.iloc[:max_rows].copy()
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 3
+    n_splits = 4
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
