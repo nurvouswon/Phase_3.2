@@ -352,13 +352,56 @@ def auto_feature_crosses(X, max_cross=24, template_cols=None):
     X = X.copy()
     return X, cross_names
 
-def remove_outliers(X, y, method="iforest", contamination=0.012):
-    if method == "iforest":
-        mask = IsolationForest(contamination=contamination, random_state=42).fit_predict(X) == 1
-    else:
-        mask = LocalOutlierFactor(contamination=contamination).fit_predict(X) == 1
-    return X[mask], y[mask]
+def remove_outliers(
+    X,
+    y,
+    method="iforest",
+    contamination=0.012,
+    n_estimators=100,
+    max_samples='auto',
+    n_neighbors=20,
+    scale=True
+):
+    """
+    Remove outliers from the dataset using Isolation Forest or Local Outlier Factor.
 
+    Parameters:
+        X (array-like): Feature matrix.
+        y (array-like): Target vector.
+        method (str): "iforest" or "lof".
+        contamination (float): Proportion of outliers in the data.
+        n_estimators (int): Number of trees for IsolationForest.
+        max_samples (str or int): Number of samples for IsolationForest.
+        n_neighbors (int): Number of neighbors for LOF.
+        scale (bool): Whether to standardize features before fitting.
+
+    Returns:
+        X_filtered, y_filtered: Data with outliers removed.
+    """
+    if scale:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+    else:
+        X_scaled = X
+
+    if method == "iforest":
+        clf = IsolationForest(
+            contamination=contamination,
+            n_estimators=n_estimators,
+            max_samples=max_samples,
+            random_state=42
+        )
+        mask = clf.fit_predict(X_scaled) == 1
+    elif method == "lof":
+        clf = LocalOutlierFactor(
+            contamination=contamination,
+            n_neighbors=n_neighbors
+        )
+        mask = clf.fit_predict(X_scaled) == 1
+    else:
+        raise ValueError("Unknown method: choose 'iforest' or 'lof'")
+
+    return X[mask], y[mask]
 def smooth_labels(y, smoothing=0.02):
     y = np.asarray(y)
     y_smooth = y.copy().astype(float)
