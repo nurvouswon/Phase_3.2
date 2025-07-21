@@ -502,17 +502,17 @@ if event_file is not None and today_file is not None:
     OOS_ROWS = 10000
     X_train, X_oos = X.iloc[:-OOS_ROWS].copy(), X.iloc[-OOS_ROWS:].copy()
     y_train, y_oos = y.iloc[:-OOS_ROWS].copy(), y.iloc[-OOS_ROWS:].copy()
-    st.write(f"🔒 Automatically reserving last {OOS_ROWS} rows for Out-of-Sample (OOS) test. Using first 10000 for training.")
+    st.write(f"🔒 Automatically reserving last {OOS_ROWS} rows for Out-of-Sample (OOS) test. Using first 30000 for training.")
 
     # ===== Sampling for Streamlit Cloud =====
-    max_rows = 15000
+    max_rows = 30000
     if X_train.shape[0] > max_rows:
         st.warning(f"Training limited to {max_rows} rows for memory (full dataset was {X_train.shape[0]} rows).")
         X_train = X_train.iloc[:max_rows].copy()
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 8
+    n_splits = 4
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
