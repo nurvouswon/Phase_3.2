@@ -327,7 +327,7 @@ def stickiness_rank_boost(df, top_k=10, stickiness_boost=0.18, prev_rank_col=Non
         stick.iloc[:top_k] += stickiness_boost
     return stick
 
-def auto_feature_crosses(X, max_cross=32, template_cols=None):
+def auto_feature_crosses(X, max_cross=24, template_cols=None):
     cross_names = []
     if template_cols is not None:
         for name in template_cols:
@@ -486,8 +486,8 @@ if event_file is not None and today_file is not None:
     nan_inf_check(X_today, "X_today features")
 
     # ===== PHASE 1: Feature Crosses & Outlier Removal (sync crosses!) =====
-    X, cross_names = auto_feature_crosses(X, max_cross=32)
-    X_today, _ = auto_feature_crosses(X_today, max_cross=32, template_cols=cross_names)
+    X, cross_names = auto_feature_crosses(X, max_cross=24)
+    X_today, _ = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
     st.write(f"Cross features created: {cross_names}")
     st.write(f"After cross sync: X cols {X.shape[1]}, X_today cols {X_today.shape[1]}")
 
@@ -502,17 +502,17 @@ if event_file is not None and today_file is not None:
     OOS_ROWS = 10000
     X_train, X_oos = X.iloc[:-OOS_ROWS].copy(), X.iloc[-OOS_ROWS:].copy()
     y_train, y_oos = y.iloc[:-OOS_ROWS].copy(), y.iloc[-OOS_ROWS:].copy()
-    st.write(f"🔒 Automatically reserving last {OOS_ROWS} rows for Out-of-Sample (OOS) test. Using first 60000 for training.")
+    st.write(f"🔒 Automatically reserving last {OOS_ROWS} rows for Out-of-Sample (OOS) test. Using first 30000 for training.")
 
     # ===== Sampling for Streamlit Cloud =====
-    max_rows = 60000
+    max_rows = 30000
     if X_train.shape[0] > max_rows:
         st.warning(f"Training limited to {max_rows} rows for memory (full dataset was {X_train.shape[0]} rows).")
         X_train = X_train.iloc[:max_rows].copy()
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 2
+    n_splits = 5
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
@@ -535,7 +535,7 @@ if event_file is not None and today_file is not None:
 
         # --- Optimized Tree Model Instantiations ---
         xgb_clf = xgb.XGBClassifier(
-            n_estimators=120,
+            n_estimators=150,
             max_depth=6,
             learning_rate=0.07,
             subsample=0.8,
@@ -546,7 +546,7 @@ if event_file is not None and today_file is not None:
             verbosity=0
         )
         lgb_clf = lgb.LGBMClassifier(
-            n_estimators=120,
+            n_estimators=150,
             max_depth=7,
             num_leaves=31,
             learning_rate=0.07,
@@ -555,21 +555,21 @@ if event_file is not None and today_file is not None:
             n_jobs=1
         )
         cat_clf = cb.CatBoostClassifier(
-            iterations=120,
+            iterations=150,
             depth=7,
             learning_rate=0.08,
             verbose=0,
             thread_count=1
         )
         rf_clf = RandomForestClassifier(
-            n_estimators=120,
+            n_estimators=150,
             max_depth=8,
             max_features=0.7,
             min_samples_leaf=2,
             n_jobs=1
         )
         gb_clf = GradientBoostingClassifier(
-            n_estimators=100,
+            n_estimators=150,
             max_depth=5,
             learning_rate=0.08,
             subsample=0.8
@@ -630,13 +630,13 @@ if event_file is not None and today_file is not None:
         X_oos_train_scaled = scaler_oos.fit_transform(X_train)
         X_oos_scaled = scaler_oos.transform(X_oos)
         tree_models = [
-            xgb.XGBClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
-            lgb.LGBMClassifier(n_estimators=90, max_depth=7, learning_rate=0.08, n_jobs=1),
-            cb.CatBoostClassifier(iterations=90, depth=7, learning_rate=0.08, verbose=0, thread_count=1),
-            GradientBoostingClassifier(n_estimators=80, max_depth=7, learning_rate=0.08)
+            xgb.XGBClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
+            lgb.LGBMClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, n_jobs=1),
+            cb.CatBoostClassifier(iterations=120, depth=7, learning_rate=0.08, verbose=0, thread_count=1),
+            GradientBoostingClassifier(n_estimators=120, max_depth=7, learning_rate=0.08)
         ]
         hard_models = [
-            RandomForestClassifier(n_estimators=80, max_depth=8, n_jobs=1),
+            RandomForestClassifier(n_estimators=120, max_depth=8, n_jobs=1),
             LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
         ]
         oos_preds = []
