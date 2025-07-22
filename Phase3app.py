@@ -427,8 +427,8 @@ if event_file is not None and today_file is not None:
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 6
-    n_repeats = 3
+    n_splits = 3
+    n_repeats = 2
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
     rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
