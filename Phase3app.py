@@ -54,6 +54,23 @@ def fix_types(df):
             df[col] = df[col].astype(pd.Int64Dtype())
     return df
 
+def sanitize_df(df: pd.DataFrame, label="df"):
+    import pyarrow as pa
+    try:
+        pa.Table.from_pandas(df)  # Test conversion
+        return df
+    except Exception as e:
+        st.warning(f"⚠️ Arrow conversion failed for {label}: {e}")
+        # Fallback: convert all columns to supported types
+        for col in df.columns:
+            if df[col].dtype == "float32":
+                df[col] = df[col].astype("float64")
+            elif df[col].dtype == "int32":
+                df[col] = df[col].astype("int64")
+            elif df[col].dtype == "object":
+                df[col] = df[col].astype(str)
+        return df
+
 def clean_X(df, train_cols=None):
     df = dedup_columns(df)
     df = fix_types(df)
@@ -481,50 +498,60 @@ if event_file is not None and today_file is not None:
     from itertools import combinations
     
     # --- Outlier removal ---
-    st.write("Starting outlier removal...")
+    st.write("🚦 Starting outlier removal...")
     y = event_df[target_col].astype(int)
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
     X = X.reset_index(drop=True).copy()
     y = pd.Series(y).reset_index(drop=True)
-    st.write(f"Outlier removal complete. Rows remaining: {X.shape[0]}")
+    st.write(f"✅ Outlier removal complete. Rows remaining: {X.shape[0]}")
 
     # --- Fill missing values ---
-    st.write("Filling missing values...")
+    st.write("🩹 Filling missing values...")
     X = X.fillna(-1)
     X_today = X_today.fillna(-1)
 
     # --- Step 1: Initial model to rank base features ---
-    st.write("Training initial XGBoost model to rank base features...")
+    st.write("🔬 Training initial XGBoost model to rank base features...")
     initial_model = XGBClassifier(n_estimators=100, max_depth=4, verbosity=0, random_state=42)
     initial_model.fit(X, y)
     base_importances = pd.Series(initial_model.feature_importances_, index=X.columns)
     top_base_features = base_importances.sort_values(ascending=False).head(30).index.tolist()
-    st.write("Top base features selected:", top_base_features)
+    st.write("🏆 Top base features selected:", top_base_features)
 
     # --- Step 2: Generate cross-features using interactions ---
-    st.write("Generating cross-features...")
+    st.write("🔗 Generating cross-features...")
     poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
-    X_cross = pd.DataFrame(poly.fit_transform(X[top_base_features]), columns=poly.get_feature_names_out(top_base_features))
+    X_cross = pd.DataFrame(
+        poly.fit_transform(X[top_base_features]),
+        columns=poly.get_feature_names_out(top_base_features)
+    )
     X_cross = X_cross.loc[:, ~X_cross.columns.duplicated()]
-    st.write(f"Cross-feature matrix shape: {X_cross.shape}")
+    st.write(f"🔢 Cross-feature matrix shape: {X_cross.shape}")
 
     # --- Step 3: Combine and re-rank all features (base + cross) ---
-    st.write("Combining base and cross features...")
+    st.write("🧩 Combining base and cross features...")
     X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
 
-    st.write("Fitting logistic regression to rank combined features...")
+    st.write("📈 Fitting logistic regression to rank combined features...")
     lr = LogisticRegression(max_iter=1000, solver='liblinear')
     lr.fit(X_combined, y)
     coefs = pd.Series(np.abs(lr.coef_[0]), index=X_combined.columns)
     top_combined_features = coefs.sort_values(ascending=False).head(40).index.tolist()
-    st.write("Top combined features selected:", top_combined_features)
+    st.write("🏁 Top combined features selected:", top_combined_features)
 
     # --- Final output ---
     X_selected = X_combined[top_combined_features]
     X_today_selected = X_today[X_selected.columns.intersection(X_today.columns)]
 
-    st.write(f"Final selected feature shape: {X_selected.shape}")
-    st.write("Feature engineering and selection complete ✅")
+    st.write(f"✅ Final selected feature shape: {X_selected.shape}")
+    st.write("🎯 Feature engineering and selection complete ✅")
+
+    # --- 🔐 Safe output for Streamlit or export ---
+    X_selected = sanitize_df(X_selected, label="Final X_selected")
+    X_today_selected = sanitize_df(X_today_selected, label="X_today_selected")
+
+    # OPTIONAL: View or export
+    st.dataframe(X_selected)
 
     # ========== OOS TEST =============
     OOS_ROWS = 10000
