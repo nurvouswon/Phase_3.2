@@ -547,7 +547,7 @@ if event_file is not None and today_file is not None:
         )
         lgb_clf = lgb.LGBMClassifier(
             n_estimators=140,
-            max_depth=11,
+            max_depth=10,
             num_leaves=64,
             learning_rate=0.019,
             subsample=0.92,
@@ -556,14 +556,14 @@ if event_file is not None and today_file is not None:
         )
         cat_clf = cb.CatBoostClassifier(
             iterations=140,
-            depth=11,
+            depth=10,
             learning_rate=0.021,
             verbose=0,
             thread_count=1
         )
         rf_clf = RandomForestClassifier(
             n_estimators=140,
-            max_depth=12,
+            max_depth=10,
             max_features=0.85,
             min_samples_leaf=2,
             n_jobs=1
@@ -631,12 +631,12 @@ if event_file is not None and today_file is not None:
         X_oos_scaled = scaler_oos.transform(X_oos)
         tree_models = [
             xgb.XGBClassifier(n_estimators=140, max_depth=10, learning_rate=0.02, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
-            lgb.LGBMClassifier(n_estimators=140, max_depth=11, learning_rate=0.02, n_jobs=1),
-            cb.CatBoostClassifier(iterations=140, depth=11, learning_rate=0.02, verbose=0, thread_count=1),
+            lgb.LGBMClassifier(n_estimators=140, max_depth=10, learning_rate=0.02, n_jobs=1),
+            cb.CatBoostClassifier(iterations=140, depth=10, learning_rate=0.02, verbose=0, thread_count=1),
             GradientBoostingClassifier(n_estimators=140, max_depth=8, learning_rate=0.02)
         ]
         hard_models = [
-            RandomForestClassifier(n_estimators=140, max_depth=12, n_jobs=1),
+            RandomForestClassifier(n_estimators=140, max_depth=10, n_jobs=1),
             LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
         ]
         oos_preds = []
