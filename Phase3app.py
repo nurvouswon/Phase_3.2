@@ -57,11 +57,10 @@ def fix_types(df):
 def sanitize_df(df: pd.DataFrame, label="df"):
     import pyarrow as pa
     try:
-        pa.Table.from_pandas(df)  # Test conversion
+        pa.Table.from_pandas(df)
         return df
     except Exception as e:
         st.warning(f"⚠️ Arrow conversion failed for {label}: {e}")
-        # Fallback: convert all columns to supported types
         for col in df.columns:
             if df[col].dtype == "float32":
                 df[col] = df[col].astype("float64")
@@ -540,11 +539,11 @@ if event_file is not None and today_file is not None:
     st.write("🏁 Top combined features selected:", top_combined_features)
 
     # --- Final output ---
-    X_selected = X_combined[top_combined_features]
-    X_today_selected = X_today[X_selected.columns.intersection(X_today.columns)]
+    X_selected = sanitize_df(X_combined[top_combined_features], label="X_selected")
+    X_today_selected = sanitize_df(X_today[X_selected.columns.intersection(X_today.columns)], label="X_today_selected")
 
-    st.write(f"✅ Final selected feature shape: {X_selected.shape}")
-    st.write("🎯 Feature engineering and selection complete ✅")
+    st.write(f"Final selected feature shape: {X_selected.shape}")
+    st.write("Feature engineering and selection complete ✅")
 
     # --- 🔐 Safe output for Streamlit or export ---
     X_selected = sanitize_df(X_selected, label="Final X_selected")
