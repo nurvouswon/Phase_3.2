@@ -357,7 +357,7 @@ def remove_outliers(
     y,
     method="iforest",
     contamination=0.012,
-    n_estimators=150,
+    n_estimators=100,
     max_samples='auto',
     n_neighbors=20,
     scale=True
@@ -512,7 +512,7 @@ if event_file is not None and today_file is not None:
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 3
+    n_splits = 4
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
@@ -536,7 +536,7 @@ if event_file is not None and today_file is not None:
         # --- Optimized Tree Model Instantiations ---
         xgb_clf = xgb.XGBClassifier(
             n_estimators=150,
-            max_depth=10,
+            max_depth=6,
             learning_rate=0.07,
             subsample=0.8,
             colsample_bytree=0.8,
@@ -547,7 +547,7 @@ if event_file is not None and today_file is not None:
         )
         lgb_clf = lgb.LGBMClassifier(
             n_estimators=150,
-            max_depth=10,
+            max_depth=7,
             num_leaves=31,
             learning_rate=0.07,
             subsample=0.8,
@@ -556,21 +556,21 @@ if event_file is not None and today_file is not None:
         )
         cat_clf = cb.CatBoostClassifier(
             iterations=150,
-            depth=10,
+            depth=7,
             learning_rate=0.08,
             verbose=0,
             thread_count=1
         )
         rf_clf = RandomForestClassifier(
             n_estimators=150,
-            max_depth=10,
+            max_depth=8,
             max_features=0.7,
             min_samples_leaf=2,
             n_jobs=1
         )
         gb_clf = GradientBoostingClassifier(
             n_estimators=150,
-            max_depth=7,
+            max_depth=5,
             learning_rate=0.08,
             subsample=0.8
         )
