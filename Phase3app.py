@@ -474,22 +474,42 @@ if event_file is not None and today_file is not None:
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
 
-    # ======= LIMIT TO 200 FEATURES BY VARIANCE =======
-    max_feats = 200
-    variances = X.var().sort_values(ascending=False)
-    top_feat_names = variances.head(max_feats).index.tolist()
-    X = X[top_feat_names]
-    X_today = X_today[top_feat_names]
-    st.success(f"Final number of features after auto-filtering: {X.shape[1]}")
+    from xgboost import XGBClassifier
+    from itertools import combinations
 
-    nan_inf_check(X, "X features")
-    nan_inf_check(X_today, "X_today features")
+    # --- Step 1: Base numeric cleanup ---
+    numeric_cols = X.select_dtypes(include=[np.number]).columns
+    X = X[numeric_cols].copy()
+    X_today = X_today[numeric_cols].copy()
 
-    # ===== PHASE 1: Feature Crosses & Outlier Removal (sync crosses!) =====
-    X, cross_names = auto_feature_crosses(X, max_cross=24)
-    X_today, _ = auto_feature_crosses(X_today, max_cross=24, template_cols=cross_names)
-    st.write(f"Cross features created: {cross_names}")
-    st.write(f"After cross sync: X cols {X.shape[1]}, X_today cols {X_today.shape[1]}")
+    X = X.dropna(axis=1, how='any')
+    X = X.loc[:, X.var() > 0]
+    X_today = X_today[X.columns]  # Align columns
+
+    # --- Step 2: Train initial XGBoost to find top raw features ---
+    initial_model = XGBClassifier(n_estimators=100, max_depth=4, verbosity=0, random_state=42)
+    initial_model.fit(X.fillna(-1), y)
+
+    base_importances = pd.Series(initial_model.feature_importances_, index=X.columns)
+    top_base_features = base_importances.sort_values(ascending=False).head(100).index.tolist()
+
+    # --- Step 3: Create cross-feature interactions from top base features ---
+    interaction_pairs = list(combinations(top_base_features, 2))
+    for f1, f2 in interaction_pairs:
+        new_col = f"{f1}_x_{f2}"
+        X[new_col] = X[f1] * X[f2]
+        X_today[new_col] = X_today[f1] * X_today[f2]
+
+    # --- Step 4: Train second XGBoost model to re-score all features ---
+    expanded_model = XGBClassifier(n_estimators=150, max_depth=5, verbosity=0, random_state=42)
+    expanded_model.fit(X.fillna(-1), y)
+
+    final_importances = pd.Series(expanded_model.feature_importances_, index=X.columns)
+    top_final_features = final_importances.sort_values(ascending=False).head(200).index.tolist()
+
+    # --- Step 5: Filter final datasets ---
+    X = X[top_final_features]
+    X_today = X_today[top_final_features]
 
     # Outlier removal (train only, before smoothing!)
     y = event_df[target_col].astype(int)
