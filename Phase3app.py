@@ -477,46 +477,51 @@ if event_file is not None and today_file is not None:
     from xgboost import XGBClassifier
     from itertools import combinations
     
-    # Outlier removal (train only, before smoothing!)
+    # --- Outlier removal ---
+    st.write("Starting outlier removal...")
     y = event_df[target_col].astype(int)
     X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
     X = X.reset_index(drop=True).copy()
     y = pd.Series(y).reset_index(drop=True)
-    st.write(f"Rows after outlier removal: {X.shape[0]}")
+    st.write(f"Outlier removal complete. Rows remaining: {X.shape[0]}")
 
-    # --- Step 1: Base numeric cleanup ---
-    numeric_cols = X.select_dtypes(include=[np.number]).columns
-    X = X[numeric_cols].copy()
-    X_today = X_today[numeric_cols].copy()
+    # --- Fill missing values ---
+    st.write("Filling missing values...")
+    X = X.fillna(-1)
+    X_today = X_today.fillna(-1)
 
-    X = X.dropna(axis=1, how='any')
-    X = X.loc[:, X.var() > 0]
-    X_today = X_today[X.columns]  # Align columns
-
-    # --- Step 2: Train initial XGBoost to find top raw features ---
+    # --- Step 1: Initial model to rank base features ---
+    st.write("Training initial XGBoost model to rank base features...")
     initial_model = XGBClassifier(n_estimators=100, max_depth=4, verbosity=0, random_state=42)
-    initial_model.fit(X.fillna(-1), y)
-
+    initial_model.fit(X, y)
     base_importances = pd.Series(initial_model.feature_importances_, index=X.columns)
-    top_base_features = base_importances.sort_values(ascending=False).head(100).index.tolist()
+    top_base_features = base_importances.sort_values(ascending=False).head(30).index.tolist()
+    st.write("Top base features selected:", top_base_features)
 
-    # --- Step 3: Create cross-feature interactions from top base features ---
-    interaction_pairs = list(combinations(top_base_features, 2))
-    for f1, f2 in interaction_pairs:
-        new_col = f"{f1}_x_{f2}"
-        X[new_col] = X[f1] * X[f2]
-        X_today[new_col] = X_today[f1] * X_today[f2]
+    # --- Step 2: Generate cross-features using interactions ---
+    st.write("Generating cross-features...")
+    poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+    X_cross = pd.DataFrame(poly.fit_transform(X[top_base_features]), columns=poly.get_feature_names_out(top_base_features))
+    X_cross = X_cross.loc[:, ~X_cross.columns.duplicated()]
+    st.write(f"Cross-feature matrix shape: {X_cross.shape}")
 
-    # --- Step 4: Train second XGBoost model to re-score all features ---
-    expanded_model = XGBClassifier(n_estimators=150, max_depth=5, verbosity=0, random_state=42)
-    expanded_model.fit(X.fillna(-1), y)
+    # --- Step 3: Combine and re-rank all features (base + cross) ---
+    st.write("Combining base and cross features...")
+    X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
 
-    final_importances = pd.Series(expanded_model.feature_importances_, index=X.columns)
-    top_final_features = final_importances.sort_values(ascending=False).head(200).index.tolist()
+    st.write("Fitting logistic regression to rank combined features...")
+    lr = LogisticRegression(max_iter=1000, solver='liblinear')
+    lr.fit(X_combined, y)
+    coefs = pd.Series(np.abs(lr.coef_[0]), index=X_combined.columns)
+    top_combined_features = coefs.sort_values(ascending=False).head(40).index.tolist()
+    st.write("Top combined features selected:", top_combined_features)
 
-    # --- Step 5: Filter final datasets ---
-    X = X[top_final_features]
-    X_today = X_today[top_final_features]
+    # --- Final output ---
+    X_selected = X_combined[top_combined_features]
+    X_today_selected = X_today[X_selected.columns.intersection(X_today.columns)]
+
+    st.write(f"Final selected feature shape: {X_selected.shape}")
+    st.write("Feature engineering and selection complete ✅")
 
     # ========== OOS TEST =============
     OOS_ROWS = 10000
