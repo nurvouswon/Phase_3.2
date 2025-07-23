@@ -326,7 +326,7 @@ def smooth_labels(y, smoothing=0.01):
 
 # ---- APP START ----
 
-event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
+event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', ' 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
 if event_file is not None and today_file is not None:
@@ -439,6 +439,11 @@ if event_file is not None and today_file is not None:
     fold_times = []
     show_shap = st.checkbox("Show SHAP Feature Importance (slow, only for small datasets)", value=False)
 
+    # ---- Progress bar for KFold
+    total_folds = n_splits * n_repeats
+    progress_bar = st.progress(0)
+    fold_status_placeholder = st.empty()
+
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X_train, y_train)):
         t_fold_start = time.time()
         X_tr, X_va = X_train.iloc[tr_idx], X_train.iloc[va_idx]
@@ -533,7 +538,10 @@ if event_file is not None and today_file is not None:
         fold_times.append(fold_time)
         avg_time = np.mean(fold_times)
         est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
-        st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
+
+        # Update progress bar and fold timing
+        progress_bar.progress((fold + 1) / total_folds)
+        fold_status_placeholder.info(f"Fold {fold + 1}/{total_folds} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
 
     # Bagged predictions
     y_val_bag = val_fold_probas.mean(axis=1)
