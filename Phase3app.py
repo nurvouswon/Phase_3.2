@@ -476,6 +476,13 @@ if event_file is not None and today_file is not None:
 
     from xgboost import XGBClassifier
     from itertools import combinations
+    
+    # Outlier removal (train only, before smoothing!)
+    y = event_df[target_col].astype(int)
+    X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
+    X = X.reset_index(drop=True).copy()
+    y = pd.Series(y).reset_index(drop=True)
+    st.write(f"Rows after outlier removal: {X.shape[0]}")
 
     # --- Step 1: Base numeric cleanup ---
     numeric_cols = X.select_dtypes(include=[np.number]).columns
@@ -510,13 +517,6 @@ if event_file is not None and today_file is not None:
     # --- Step 5: Filter final datasets ---
     X = X[top_final_features]
     X_today = X_today[top_final_features]
-
-    # Outlier removal (train only, before smoothing!)
-    y = event_df[target_col].astype(int)
-    X, y = remove_outliers(X, y, method="iforest", contamination=0.012)
-    X = X.reset_index(drop=True).copy()
-    y = pd.Series(y).reset_index(drop=True)
-    st.write(f"Rows after outlier removal: {X.shape[0]}")
 
     # ========== OOS TEST =============
     OOS_ROWS = 10000
