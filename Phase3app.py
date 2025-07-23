@@ -630,13 +630,13 @@ if event_file is not None and today_file is not None:
         X_oos_train_scaled = scaler_oos.fit_transform(X_train)
         X_oos_scaled = scaler_oos.transform(X_oos)
         tree_models = [
-            xgb.XGBClassifier(n_estimators=140, max_depth=10, learning_rate=0.02, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
-            lgb.LGBMClassifier(n_estimators=140, max_depth=10, learning_rate=0.02, n_jobs=1),
-            cb.CatBoostClassifier(iterations=140, depth=10, learning_rate=0.02, verbose=0, thread_count=1),
-            GradientBoostingClassifier(n_estimators=140, max_depth=8, learning_rate=0.02)
+            xgb.XGBClassifier(n_estimators=120, max_depth=7, learning_rate=0.02, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
+            lgb.LGBMClassifier(n_estimators=120, max_depth=7, learning_rate=0.02, n_jobs=1),
+            cb.CatBoostClassifier(iterations=120, depth=7, learning_rate=0.02, verbose=0, thread_count=1),
+            GradientBoostingClassifier(n_estimators=140, max_depth=6, learning_rate=0.02)
         ]
         hard_models = [
-            RandomForestClassifier(n_estimators=140, max_depth=10, n_jobs=1),
+            RandomForestClassifier(n_estimators=120, max_depth=7, n_jobs=1),
             LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
         ]
         oos_preds = []
