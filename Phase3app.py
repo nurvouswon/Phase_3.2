@@ -57,17 +57,22 @@ def fix_types(df):
 def sanitize_df(df: pd.DataFrame, label="df"):
     import pyarrow as pa
     try:
+        # Try to convert directly to Arrow (PyArrow will catch dtype issues)
         pa.Table.from_pandas(df)
         return df
     except Exception as e:
-        st.warning(f"⚠️ Arrow conversion failed for {label}: {e}")
+        st.warning(f"⚠️ Sanitizing '{label}' due to Arrow conversion error: {e}")
         for col in df.columns:
-            if df[col].dtype == "float32":
+            dtype = df[col].dtype
+            if dtype == "float32":
                 df[col] = df[col].astype("float64")
-            elif df[col].dtype == "int32":
+            elif dtype == "int32":
                 df[col] = df[col].astype("int64")
-            elif df[col].dtype == "object":
-                df[col] = df[col].astype(str)
+            elif dtype == "object":
+                try:
+                    df[col] = df[col].astype(str)
+                except:
+                    df[col] = df[col].astype("string")
         return df
 
 def clean_X(df, train_cols=None):
