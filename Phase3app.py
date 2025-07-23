@@ -357,7 +357,7 @@ def remove_outliers(
     y,
     method="iforest",
     contamination=0.008,
-    n_estimators=180,
+    n_estimators=150,
     max_samples='auto',
     n_neighbors=20,
     scale=True
@@ -512,7 +512,7 @@ if event_file is not None and today_file is not None:
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 1
+    n_splits = 2
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
@@ -535,7 +535,7 @@ if event_file is not None and today_file is not None:
 
         # --- Optimized Tree Model Instantiations ---
         xgb_clf = xgb.XGBClassifier(
-            n_estimators=180,
+            n_estimators=150,
             max_depth=11,
             learning_rate=0.022,
             subsample=0.92,
@@ -546,7 +546,7 @@ if event_file is not None and today_file is not None:
             verbosity=0
         )
         lgb_clf = lgb.LGBMClassifier(
-            n_estimators=180,
+            n_estimators=150,
             max_depth=12,
             num_leaves=64,
             learning_rate=0.019,
@@ -555,21 +555,21 @@ if event_file is not None and today_file is not None:
             n_jobs=1
         )
         cat_clf = cb.CatBoostClassifier(
-            iterations=180,
+            iterations=150,
             depth=12,
             learning_rate=0.021,
             verbose=0,
             thread_count=1
         )
         rf_clf = RandomForestClassifier(
-            n_estimators=180,
+            n_estimators=150,
             max_depth=14,
             max_features=0.85,
             min_samples_leaf=2,
             n_jobs=1
         )
         gb_clf = GradientBoostingClassifier(
-            n_estimators=180,
+            n_estimators=150,
             max_depth=9,
             learning_rate=0.021,
             subsample=0.92
@@ -630,13 +630,13 @@ if event_file is not None and today_file is not None:
         X_oos_train_scaled = scaler_oos.fit_transform(X_train)
         X_oos_scaled = scaler_oos.transform(X_oos)
         tree_models = [
-            xgb.XGBClassifier(n_estimators=180, max_depth=12, learning_rate=0.02, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
-            lgb.LGBMClassifier(n_estimators=180, max_depth=12, learning_rate=0.02, n_jobs=1),
-            cb.CatBoostClassifier(iterations=180, depth=12, learning_rate=0.02, verbose=0, thread_count=1),
-            GradientBoostingClassifier(n_estimators=180, max_depth=11, learning_rate=0.02)
+            xgb.XGBClassifier(n_estimators=150, max_depth=12, learning_rate=0.02, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
+            lgb.LGBMClassifier(n_estimators=150, max_depth=12, learning_rate=0.02, n_jobs=1),
+            cb.CatBoostClassifier(iterations=150, depth=12, learning_rate=0.02, verbose=0, thread_count=1),
+            GradientBoostingClassifier(n_estimators=150, max_depth=11, learning_rate=0.02)
         ]
         hard_models = [
-            RandomForestClassifier(n_estimators=180, max_depth=14, n_jobs=1),
+            RandomForestClassifier(n_estimators=150, max_depth=14, n_jobs=1),
             LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
         ]
         oos_preds = []
