@@ -1,3 +1,5 @@
+import os
+os.environ["STREAMLIT_WATCHDOG_USE_POLLING"] = "true"
 import streamlit as st
 import pandas as pd
 import numpy as np
