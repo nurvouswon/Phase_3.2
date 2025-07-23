@@ -326,7 +326,7 @@ def smooth_labels(y, smoothing=0.01):
 
 # ---- APP START ----
 
-event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', ' 'parquet'], key='eventcsv')
+event_file = st.file_uploader("Upload Event-Level CSV/Parquet for Training (required)", type=['csv', 'parquet'], key='eventcsv')
 today_file = st.file_uploader("Upload TODAY CSV for Prediction (required)", type=['csv', 'parquet'], key='todaycsv')
 
 if event_file is not None and today_file is not None:
