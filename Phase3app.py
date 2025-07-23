@@ -93,14 +93,23 @@ def feature_debug(X):
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
 def overlay_multiplier(row):
+    """
+    Upgraded overlay multiplier using:
+    - Batted ball pull/oppo/fb/gb/air for both batter and pitcher.
+    - Full wind direction parsing.
+    - Handedness logic.
+    - Amplified, but reasonable, effects for correct context.
+    """
     edge = 1.0
 
+    # --- Get relevant values safely ---
     wind = row.get("wind_mph", np.nan)
     wind_dir = str(row.get("wind_dir_string", "")).lower().strip()
     temp = row.get("temp", np.nan)
     humidity = row.get("humidity", np.nan)
     park_hr_col = 'park_hr_rate'
 
+    # Batter
     b_hand = str(row.get('stand', row.get('batter_hand', 'R'))).upper() or "R"
     b_pull = row.get("pull_rate", np.nan)
     b_oppo = row.get("oppo_rate", np.nan)
@@ -108,8 +117,9 @@ def overlay_multiplier(row):
     b_air = row.get("air_rate", np.nan)
     b_ld = row.get("ld_rate", np.nan)
     b_pu = row.get("pu_rate", np.nan)
-    b_hot = row.get("b_hr_per_pa_7", np.nan)
+    b_hot = row.get("b_hr_per_pa_7", np.nan)  # rolling HR/PA
     
+    # Pitcher
     p_hand = str(row.get("pitcher_hand", "")).upper() or "R"
     p_fb = row.get("p_fb_rate", row.get("fb_rate", np.nan))
     p_gb = row.get("p_gb_rate", row.get("gb_rate", np.nan))
@@ -117,12 +127,14 @@ def overlay_multiplier(row):
     p_ld = row.get("p_ld_rate", row.get("ld_rate", np.nan))
     p_pu = row.get("p_pu_rate", row.get("pu_rate", np.nan))
 
+    # --- Wind logic: Amplified/Smart ---
     wind_factor = 1.0
     if wind is not None and pd.notnull(wind) and wind >= 7 and wind_dir and wind_dir != "nan":
+        # Strong outfield wind: boost for right context
         for field, out_bonus, in_bonus, field_side in [
-            ("rf", 1.19, 0.85, ("R", "oppo")),
-            ("lf", 1.19, 0.85, ("R", "pull")),
-            ("cf", 1.11, 0.90, ("ANY", "fb")),
+            ("rf", 1.19, 0.85, ("R", "oppo")),  # RHH oppo or LHH pull to RF
+            ("lf", 1.19, 0.85, ("R", "pull")),  # RHH pull or LHH oppo to LF
+            ("cf", 1.11, 0.90, ("ANY", "fb")),  # Any FB to CF
         ]:
             if field in wind_dir:
                 if "out" in wind_dir or "o" in wind_dir:
@@ -146,32 +158,89 @@ def overlay_multiplier(row):
                         if b_fb > 0.21 or b_air > 0.34:
                             wind_factor *= in_bonus
 
+        # Add extra boost/fade for high-flyball hitters facing high-flyball pitchers
         if p_fb is not np.nan and p_fb > 0.25 and (b_fb > 0.23 or b_air > 0.36):
             if "out" in wind_dir or "o" in wind_dir:
                 wind_factor *= 1.09
             elif "in" in wind_dir or "i" in wind_dir:
                 wind_factor *= 0.94
+        # Fade for extreme groundball pitchers
         if p_gb is not np.nan and p_gb > 0.53:
             wind_factor *= 0.93
 
+    # --- Hot streak logic (recent HR/PA) ---
     if b_hot is not np.nan and b_hot > 0.09:
         edge *= 1.04
     elif b_hot is not np.nan and b_hot < 0.025:
         edge *= 0.97
 
+    # --- Weather logic ---
     if temp is not None and pd.notnull(temp):
         edge *= 1.036 ** ((temp - 70) / 10)
     if humidity is not None and pd.notnull(humidity):
         if humidity > 65: edge *= 1.02
         elif humidity < 35: edge *= 0.98
 
+    # --- Park HR Rate logic ---
     if park_hr_col in row and pd.notnull(row[park_hr_col]):
         pf = max(0.80, min(1.22, float(row[park_hr_col])))
         edge *= pf
 
+    # --- Multiply wind after everything else, so it can be "amplifying" ---
     edge *= wind_factor
 
+    # --- Clamp for sanity ---
     return float(np.clip(edge, 0.70, 1.36))
+    def apply_wind_bonus(factor, cond):
+        nonlocal edge
+        if cond:
+            edge *= factor
+
+    if wind >= 7 and isinstance(wind_dir, str) and wind_dir and wind_dir != "nan":
+        if "out" in wind_dir or "o" in wind_dir:
+            if "rf" in wind_dir:
+                apply_wind_bonus(1.10, hand == "R" and b_oppo is not np.nan and b_oppo > 0.28)
+                apply_wind_bonus(1.13, hand == "L" and b_pull is not np.nan and b_pull > 0.37)
+            if "lf" in wind_dir:
+                apply_wind_bonus(1.13, hand == "R" and b_pull is not np.nan and b_pull > 0.37)
+                apply_wind_bonus(1.10, hand == "L" and b_oppo is not np.nan and b_oppo > 0.28)
+            if "cf" in wind_dir:
+                apply_wind_bonus(1.06, b_fb is not np.nan and b_fb > 0.22)
+        elif "in" in wind_dir or "i" in wind_dir:
+            if "rf" in wind_dir:
+                apply_wind_bonus(0.91, hand == "R" and b_oppo is not np.nan and b_oppo > 0.28)
+                apply_wind_bonus(0.88, hand == "L" and b_pull is not np.nan and b_pull > 0.37)
+            if "lf" in wind_dir:
+                apply_wind_bonus(0.88, hand == "R" and b_pull is not np.nan and b_pull > 0.37)
+                apply_wind_bonus(0.91, hand == "L" and b_oppo is not np.nan and b_oppo > 0.28)
+            if "cf" in wind_dir:
+                apply_wind_bonus(0.93, b_fb is not np.nan and b_fb > 0.22)
+
+        if p_fb is not np.nan and p_fb > 0.24:
+            if "out" in wind_dir or "o" in wind_dir:
+                edge *= 1.05
+            elif "in" in wind_dir or "i" in wind_dir:
+                edge *= 0.97
+        if p_gb is not np.nan and p_gb > 0.49:
+            edge *= 0.97
+
+    temp = row.get("temp", np.nan)
+    if pd.notnull(temp):
+        edge *= 1.03 ** ((temp - 70) / 10)
+
+    humidity = row.get("humidity", np.nan)
+    if pd.notnull(humidity):
+        if humidity > 60:
+            edge *= 1.02
+        elif humidity < 40:
+            edge *= 0.98
+
+    park_hr_col = 'park_hr_rate'
+    if park_hr_col in row and pd.notnull(row[park_hr_col]):
+        pf = max(0.85, min(1.20, float(row[park_hr_col])))
+        edge *= pf
+
+    return float(np.clip(edge, 0.75, 1.33))
 
 def rate_weather(row):
     ratings = {}
@@ -293,6 +362,22 @@ def remove_outliers(
     n_neighbors=20,
     scale=True
 ):
+    """
+    Remove outliers from the dataset using Isolation Forest or Local Outlier Factor.
+
+    Parameters:
+        X (array-like): Feature matrix.
+        y (array-like): Target vector.
+        method (str): "iforest" or "lof".
+        contamination (float): Proportion of outliers in the data.
+        n_estimators (int): Number of trees for IsolationForest.
+        max_samples (str or int): Number of samples for IsolationForest.
+        n_neighbors (int): Number of neighbors for LOF.
+        scale (bool): Whether to standardize features before fitting.
+
+    Returns:
+        X_filtered, y_filtered: Data with outliers removed.
+    """
     if scale:
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
@@ -317,7 +402,7 @@ def remove_outliers(
         raise ValueError("Unknown method: choose 'iforest' or 'lof'")
 
     return X[mask], y[mask]
-def smooth_labels(y, smoothing=0.01):
+def smooth_labels(y, smoothing=0.02):
     y = np.asarray(y)
     y_smooth = y.copy().astype(float)
     y_smooth[y == 1] = 1 - smoothing
@@ -427,7 +512,7 @@ if event_file is not None and today_file is not None:
         y_train = y_train.iloc[:max_rows].copy()
 
     # ---- KFold Setup ----
-    n_splits = 4
+    n_splits = 3
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
@@ -438,11 +523,6 @@ if event_file is not None and today_file is not None:
     scaler = StandardScaler()
     fold_times = []
     show_shap = st.checkbox("Show SHAP Feature Importance (slow, only for small datasets)", value=False)
-
-    # ---- Progress bar for KFold
-    total_folds = n_splits * n_repeats
-    progress_bar = st.progress(0)
-    fold_status_placeholder = st.empty()
 
     for fold, (tr_idx, va_idx) in enumerate(rskf.split(X_train, y_train)):
         t_fold_start = time.time()
@@ -455,7 +535,7 @@ if event_file is not None and today_file is not None:
 
         # --- Optimized Tree Model Instantiations ---
         xgb_clf = xgb.XGBClassifier(
-            n_estimators=400,
+            n_estimators=200,
             max_depth=11,
             learning_rate=0.022,
             subsample=0.92,
@@ -466,7 +546,7 @@ if event_file is not None and today_file is not None:
             verbosity=0
         )
         lgb_clf = lgb.LGBMClassifier(
-            n_estimators=400,
+            n_estimators=200,
             max_depth=12,
             num_leaves=64,
             learning_rate=0.019,
@@ -475,27 +555,27 @@ if event_file is not None and today_file is not None:
             n_jobs=1
         )
         cat_clf = cb.CatBoostClassifier(
-            iterations=400,
+            iterations=200,
             depth=12,
             learning_rate=0.021,
             verbose=0,
             thread_count=1
         )
         rf_clf = RandomForestClassifier(
-            n_estimators=400,
+            n_estimators=200,
             max_depth=14,
             max_features=0.85,
             min_samples_leaf=2,
             n_jobs=1
         )
         gb_clf = GradientBoostingClassifier(
-            n_estimators=400,
+            n_estimators=200,
             max_depth=9,
             learning_rate=0.021,
             subsample=0.92
         )
         lr_clf = LogisticRegression(
-            max_iter=1200,
+            max_iter=800,
             solver='lbfgs',
             n_jobs=1
         )
@@ -538,10 +618,7 @@ if event_file is not None and today_file is not None:
         fold_times.append(fold_time)
         avg_time = np.mean(fold_times)
         est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
-
-        # Update progress bar and fold timing
-        progress_bar.progress((fold + 1) / total_folds)
-        fold_status_placeholder.info(f"Fold {fold + 1}/{total_folds} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
+        st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
 
     # Bagged predictions
     y_val_bag = val_fold_probas.mean(axis=1)
@@ -553,14 +630,14 @@ if event_file is not None and today_file is not None:
         X_oos_train_scaled = scaler_oos.fit_transform(X_train)
         X_oos_scaled = scaler_oos.transform(X_oos)
         tree_models = [
-            xgb.XGBClassifier(n_estimators=350, max_depth=12, learning_rate=0.02, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
-            lgb.LGBMClassifier(n_estimators=350, max_depth=12, learning_rate=0.02, n_jobs=1),
-            cb.CatBoostClassifier(iterations=350, depth=12, learning_rate=0.02, verbose=0, thread_count=1),
-            GradientBoostingClassifier(n_estimators=350, max_depth=11, learning_rate=0.02)
+            xgb.XGBClassifier(n_estimators=200, max_depth=12, learning_rate=0.02, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
+            lgb.LGBMClassifier(n_estimators=200, max_depth=12, learning_rate=0.02, n_jobs=1),
+            cb.CatBoostClassifier(iterations=200, depth=12, learning_rate=0.02, verbose=0, thread_count=1),
+            GradientBoostingClassifier(n_estimators=200, max_depth=11, learning_rate=0.02)
         ]
         hard_models = [
-            RandomForestClassifier(n_estimators=350, max_depth=14, n_jobs=1),
-            LogisticRegression(max_iter=1200, solver='lbfgs', n_jobs=1)
+            RandomForestClassifier(n_estimators=200, max_depth=14, n_jobs=1),
+            LogisticRegression(max_iter=800, solver='lbfgs', n_jobs=1)
         ]
         oos_preds = []
         for model in tree_models:
