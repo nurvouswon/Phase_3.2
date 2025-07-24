@@ -522,8 +522,8 @@ if event_file is not None and today_file is not None:
     # --- Step 3: Combine and re-rank all features (base + cross) ---
     st.write("🧩 Combining base and cross features...")
     X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
-    feature_debug(X_today_selected)
-    st.dataframe(X_today_selected)  # the line that crashes
+    feature_debug(X_combined)
+    st.dataframe(X_combined)
     st.write("📈 Fitting logistic regression to rank combined features...")
     lr = LogisticRegression(max_iter=1000, solver='liblinear')
     lr.fit(X_combined, y)
