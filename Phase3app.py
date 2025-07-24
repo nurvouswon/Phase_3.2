@@ -16,6 +16,7 @@ from sklearn.isotonic import IsotonicRegression
 from betacal import BetaCalibration
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.ensemble import IsolationForest
+from xgboost import XGBClassifier
 import matplotlib.pyplot as plt
 import shap
 
