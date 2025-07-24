@@ -519,29 +519,10 @@ if event_file is not None and today_file is not None:
     st.write(f"🔢 Cross-feature matrix shape: {X_cross.shape}")
 
     # --- Step 3: Combine and re-rank all features (base + cross) ---
-    from collections import Counter
-
-    def deduplicate_columns(columns):
-        counts = Counter()
-        new_columns = []
-        for col in columns:
-            counts[col] += 1
-            if counts[col] == 1:
-                new_columns.append(col)
-            else:
-                new_columns.append(f"{col}.{counts[col]-1}")
-        return new_columns
-
-    # --- Step 3: Combine and re-rank all features (base + cross) ---
     st.write("🧩 Combining base and cross features...")
     X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
-
-    # 🚨 Deduplicate column names
-    if X_combined.columns.duplicated().any():
-        st.warning("Duplicate column names found. Automatically renaming them to prevent crash.")
-        X_combined.columns = deduplicate_columns(X_combined.columns)
-    feature_debug(X_combined)
-    st.dataframe(X_combined)
+    feature_debug(X_today_selected)
+    st.dataframe(X_today_selected)  # the line that crashes
     st.write("📈 Fitting logistic regression to rank combined features...")
     lr = LogisticRegression(max_iter=1000, solver='liblinear')
     lr.fit(X_combined, y)
@@ -578,7 +559,6 @@ if event_file is not None and today_file is not None:
     # --- Output preview ---
     st.write("📋 Preview of today's selected features:")
     st.dataframe(X_today_selected)
-
     # ========== OOS TEST =============
     OOS_ROWS = 10000
     X_train, X_oos = X.iloc[:-OOS_ROWS].copy(), X.iloc[-OOS_ROWS:].copy()
