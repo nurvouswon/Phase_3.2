@@ -57,19 +57,19 @@ def fix_types(df):
 def sanitize_df(df: pd.DataFrame, label="df"):
     import pyarrow as pa
     import streamlit as st
+    import numpy as np
 
     try:
-        # Test Arrow compatibility
         pa.Table.from_pandas(df)
-        return df
+        return df  # Already safe
     except Exception as e:
-        st.warning(f"Sanitizing '{label}' due to Arrow error: {e}")
+        st.warning(f"Sanitizing '{label}' due to Arrow conversion issue: {e}")
         for col in df.columns:
-            if df[col].dtype == "float32":
-                df[col] = df[col].astype("float64")
-            elif df[col].dtype == "int32":
-                df[col] = df[col].astype("int64")
-            elif df[col].dtype == "object":
+            if df[col].dtype == np.float32:
+                df[col] = df[col].astype(np.float64)
+            elif df[col].dtype == np.int32:
+                df[col] = df[col].astype(np.int64)
+            elif df[col].dtype == object:
                 try:
                     df[col] = df[col].astype(str)
                 except Exception:
