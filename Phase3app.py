@@ -86,26 +86,25 @@ def nan_inf_check(X, name):
         st.stop()
 
 def feature_debug(X):
-    st.write("🛡️ **Feature Debugging:**")
+    X.columns = X.columns.astype(str)  # Ensure column names are strings
+
+    st.write("🛡️ Feature Debugging:")
     st.write("Data types:", X.dtypes.value_counts())
-    
-    # Show object dtype columns
-    object_cols = X.select_dtypes(include='O').columns.tolist()
-    st.write("Columns with object dtype:", object_cols)
-    
-    # Show value samples from object columns
-    for col in object_cols:
-        st.write(f"🔍 Object column `{col}` sample values:", X[col].dropna().unique()[:5])
-        st.write(f"🔧 Value types in `{col}`:", X[col].dropna().map(type).value_counts())
-    
-    # Show non-numeric dtypes explicitly
+
+    object_cols = X.select_dtypes(include="object").columns.tolist()
+    if object_cols:
+        st.write("Columns with object dtype:", object_cols)
+    else:
+        st.write("Columns with object dtype: []")
+
     for col in X.columns:
-        if X[col].dtype not in [np.float64, np.float32, np.int64, np.int32]:
-            st.write(f"Column `{col}` is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
+        try:
+            if X[col].dtype not in [np.float64, np.float32, np.int64, np.int32]:
+                st.write(f"Column `{col}` is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
+        except Exception as e:
+            st.write(f"⚠️ Could not inspect column `{col}`: {e}")
 
-    # Show top missing value columns
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
-
 def overlay_multiplier(row):
     """
     Upgraded overlay multiplier using:
