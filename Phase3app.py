@@ -17,6 +17,7 @@ from betacal import BetaCalibration
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.ensemble import IsolationForest
 from xgboost import XGBClassifier
+from sklearn.preprocessing import PolynomialFeatures
 import matplotlib.pyplot as plt
 import shap
 
