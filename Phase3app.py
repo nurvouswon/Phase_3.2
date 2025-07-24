@@ -556,7 +556,8 @@ if event_file is not None and today_file is not None:
     X_today_selected = sanitize_df(X_today_selected, label="X_today_selected")
 
     # OPTIONAL: View or export
-    st.dataframe(X_selected)
+    X_today_selected = sanitize_df(X_today_selected, label="X_today_selected")
+    st.dataframe(X_today_selected)
 
     # ========== OOS TEST =============
     OOS_ROWS = 10000
