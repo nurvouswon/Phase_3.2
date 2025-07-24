@@ -535,11 +535,11 @@ if event_file is not None and today_file is not None:
 
     # FIX: Convert everything to float64 for Streamlit compatibility
     try:
+        X_selected = X_selected.astype(np.float64)
         X_today_selected = X_today_selected.astype(np.float64)
-        st.success("✅ Converted X_today_selected to float64 successfully")
+        st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
     except Exception as e:
-        st.error(f"❌ Failed to convert X_today_selected to float64: {e}")
-
+        st.error(f"❌ Conversion to float64 failed: {e}")
     # Final output confirmation
     st.write(f"✅ Final selected feature shape: {X_selected.shape}")
     st.write("🎯 Feature engineering and selection complete.")
