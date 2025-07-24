@@ -536,18 +536,22 @@ if event_file is not None and today_file is not None:
     if not dtype_issues.empty:
         st.warning(f"⚠️ Object-type columns found: {list(dtype_issues.index)}")
 
-    # Try converting object-type columns to float64 where possible
-    for col in dtype_issues.index:
+    ## Show diagnostic info
+    feature_debug(X_today_selected)
+
+    # Try converting object-type columns to float64
+    dtype_issues = X_today_selected.select_dtypes(include=['object'])
+    for col in dtype_issues.columns:
         try:
             X_today_selected[col] = X_today_selected[col].astype(np.float64)
             st.success(f"✅ Converted {col} to float64")
         except Exception as e:
             st.error(f"❌ Could not convert {col}: {e}")
 
-    # Force all columns to float32 as a final step
+    # Convert entire frame to float64 to fix PyArrow issues
     try:
         X_today_selected = X_today_selected.astype(np.float64)
-        st.success("✅ All columns successfully converted to float64.")
+        st.success("✅ Final conversion to float64 succeeded.")
     except Exception as e:
         st.error(f"❌ Final float64 conversion failed: {e}")
 
