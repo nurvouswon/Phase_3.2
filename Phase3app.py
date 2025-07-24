@@ -530,34 +530,17 @@ if event_file is not None and today_file is not None:
     # Reindex to ensure order matches X_selected, fill missing columns with -1
     X_today_selected = X_today_selected.reindex(columns=X_selected.columns, fill_value=-1)
 
-    # ✅ INSERTED DEBUG + FIX BLOCK HERE
-    st.write("🛠 Checking data types before displaying...")
-    dtype_issues = X_today_selected.dtypes[X_today_selected.dtypes == 'object']
-    if not dtype_issues.empty:
-        st.warning(f"⚠️ Object-type columns found: {list(dtype_issues.index)}")
-
-    ## Show diagnostic info
+    # DEBUG: Run feature diagnostics
     feature_debug(X_today_selected)
 
-    # Try converting object-type columns to float64
-    dtype_issues = X_today_selected.select_dtypes(include=['object'])
-    for col in dtype_issues.columns:
-        try:
-            X_today_selected[col] = X_today_selected[col].astype(np.float64)
-            st.success(f"✅ Converted {col} to float64")
-        except Exception as e:
-            st.error(f"❌ Could not convert {col}: {e}")
-
-    # Convert entire frame to float64 to fix PyArrow issues
+    # FIX: Convert everything to float64 for Streamlit compatibility
     try:
         X_today_selected = X_today_selected.astype(np.float64)
-        st.success("✅ Final conversion to float64 succeeded.")
+        st.success("✅ Converted X_today_selected to float64 successfully")
     except Exception as e:
-        st.error(f"❌ Final float64 conversion failed: {e}")
+        st.error(f"❌ Failed to convert X_today_selected to float64: {e}")
 
-    # Final dtype and shape check
-    st.write("📊 Final dtypes for X_today_selected:")
-    st.write(X_today_selected.dtypes)
+    # Final output confirmation
     st.write(f"✅ Final selected feature shape: {X_selected.shape}")
     st.write("🎯 Feature engineering and selection complete.")
 
