@@ -540,18 +540,18 @@ if event_file is not None and today_file is not None:
 
     # Reindex to ensure order matches X_selected, fill missing columns with -1
     X_today_selected = X_today_selected.reindex(columns=X_selected.columns, fill_value=-1)
-    st.write("Duplicate columns in X_today_selected?", X_today_selected.columns.duplicated().any())
-    # ✅ DEBUG + Preview (AFTER it's defined)
-    feature_debug(X_today_selected)
-    st.dataframe(X_today_selected)
 
-    # FIX: Convert everything to float64 for Streamlit compatibility
+    # Convert types FIRST before showing
     try:
         X_selected = X_selected.astype(np.float64)
         X_today_selected = X_today_selected.astype(np.float64)
         st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
     except Exception as e:
         st.error(f"❌ Conversion to float64 failed: {e}")
+
+    # NOW safe to debug and display
+    feature_debug(X_today_selected)
+    st.dataframe(X_today_selected)
 
     # Final output confirmation
     st.write(f"✅ Final selected feature shape: {X_selected.shape}")
