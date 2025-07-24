@@ -521,6 +521,10 @@ if event_file is not None and today_file is not None:
     # --- Step 3: Combine and re-rank all features (base + cross) ---
     st.write("🧩 Combining base and cross features...")
     X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
+    # 🚨 Deduplicate column names before Streamlit tries to render them
+    if X_combined.columns.duplicated().any():
+        st.warning("Duplicate column names found. Automatically renaming them to prevent crash.")
+        X_combined.columns = pd.io.parsers.ParserBase({'names': X_combined.columns})._maybe_dedup_names(X_combined.columns)
     feature_debug(X_combined)
     st.dataframe(X_combined)
     st.write("📈 Fitting logistic regression to rank combined features...")
