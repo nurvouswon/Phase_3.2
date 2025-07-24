@@ -540,7 +540,7 @@ if event_file is not None and today_file is not None:
 
     # Reindex to ensure order matches X_selected, fill missing columns with -1
     X_today_selected = X_today_selected.reindex(columns=X_selected.columns, fill_value=-1)
-
+    st.write("Duplicate columns in X_today_selected?", X_today_selected.columns.duplicated().any())
     # ✅ DEBUG + Preview (AFTER it's defined)
     feature_debug(X_today_selected)
     st.dataframe(X_today_selected)
