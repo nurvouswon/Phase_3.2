@@ -1,5 +1,3 @@
-import os
-os.environ["STREAMLIT_WATCHDOG_USE_POLLING"] = "true"
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -18,7 +16,6 @@ from sklearn.isotonic import IsotonicRegression
 from betacal import BetaCalibration
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import PolynomialFeatures
 import matplotlib.pyplot as plt
 import shap
 
@@ -53,28 +50,6 @@ def fix_types(df):
         if pd.api.types.is_float_dtype(df[col]) and (df[col].dropna() % 1 == 0).all():
             df[col] = df[col].astype(pd.Int64Dtype())
     return df
-
-def sanitize_df(df: pd.DataFrame, label="df"):
-    import pyarrow as pa
-    import streamlit as st
-    import numpy as np
-
-    try:
-        pa.Table.from_pandas(df)
-        return df  # Already safe
-    except Exception as e:
-        st.warning(f"Sanitizing '{label}' due to Arrow conversion issue: {e}")
-        for col in df.columns:
-            if df[col].dtype == np.float32:
-                df[col] = df[col].astype(np.float64)
-            elif df[col].dtype == np.int32:
-                df[col] = df[col].astype(np.int64)
-            elif df[col].dtype == object:
-                try:
-                    df[col] = df[col].astype(str)
-                except Exception:
-                    df[col] = df[col].astype("string")
-        return df
 
 def clean_X(df, train_cols=None):
     df = dedup_columns(df)
@@ -499,9 +474,6 @@ if event_file is not None and today_file is not None:
     X = winsorize_clip(X)
     X_today = winsorize_clip(X_today)
 
-    from xgboost import XGBClassifier
-    from itertools import combinations
-    
     # --- Outlier removal ---
     st.write("🚦 Starting outlier removal...")
     y = event_df[target_col].astype(int)
