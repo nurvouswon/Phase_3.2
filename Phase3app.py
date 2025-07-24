@@ -548,7 +548,8 @@ if event_file is not None and today_file is not None:
         st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
     except Exception as e:
         st.error(f"❌ Conversion to float64 failed: {e}")
-
+   
+    X_today_selected = X_today_selected.astype(np.float64)
     # NOW safe to debug and display
     feature_debug(X_today_selected)
     st.dataframe(X_today_selected)
