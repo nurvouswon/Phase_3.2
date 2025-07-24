@@ -88,10 +88,22 @@ def nan_inf_check(X, name):
 def feature_debug(X):
     st.write("🛡️ **Feature Debugging:**")
     st.write("Data types:", X.dtypes.value_counts())
-    st.write("Columns with object dtype:", X.select_dtypes('O').columns.tolist())
+    
+    # Show object dtype columns
+    object_cols = X.select_dtypes(include='O').columns.tolist()
+    st.write("Columns with object dtype:", object_cols)
+    
+    # Show value samples from object columns
+    for col in object_cols:
+        st.write(f"🔍 Object column `{col}` sample values:", X[col].dropna().unique()[:5])
+        st.write(f"🔧 Value types in `{col}`:", X[col].dropna().map(type).value_counts())
+    
+    # Show non-numeric dtypes explicitly
     for col in X.columns:
         if X[col].dtype not in [np.float64, np.float32, np.int64, np.int32]:
-            st.write(f"Column {col} is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
+            st.write(f"Column `{col}` is {X[col].dtype}, unique values: {X[col].unique()[:8]}")
+
+    # Show top missing value columns
     st.write("Missing values per column (top 10):", X.isna().sum().sort_values(ascending=False).head(10))
 
 def overlay_multiplier(row):
@@ -510,7 +522,8 @@ if event_file is not None and today_file is not None:
     # --- Step 3: Combine and re-rank all features (base + cross) ---
     st.write("🧩 Combining base and cross features...")
     X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
-
+    feature_debug(X_today_selected)
+    st.dataframe(X_today_selected)  # the line that crashes
     st.write("📈 Fitting logistic regression to rank combined features...")
     lr = LogisticRegression(max_iter=1000, solver='liblinear')
     lr.fit(X_combined, y)
