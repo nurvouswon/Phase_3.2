@@ -517,18 +517,23 @@ if event_file is not None and today_file is not None:
     st.write("🏁 Top combined features selected:", top_combined_features)
 
     # --- Final output ---
-    X_selected = sanitize_df(X_combined[top_combined_features], label="X_selected")
-    X_today_selected = sanitize_df(X_today[X_selected.columns.intersection(X_today.columns)], label="X_today_selected")
+    st.write("🧼 Finalizing selected features...")
 
-    st.write(f"Final selected feature shape: {X_selected.shape}")
-    st.write("Feature engineering and selection complete ✅")
+    X_selected = X_combined[top_combined_features].copy()
 
-    # --- 🔐 Safe output for Streamlit or export ---
-    X_selected = sanitize_df(X_selected, label="Final X_selected")
-    X_today_selected = sanitize_df(X_today_selected, label="X_today_selected")
+    # Align X_today to match columns and fill safely
+    common_cols = X_selected.columns.intersection(X_today.columns)
+    X_today_selected = X_today[common_cols].copy()
 
-    # OPTIONAL: View or export
-    X_today_selected = sanitize_df(X_today_selected, label="X_today_selected")
+    # Reindex to ensure order matches X_selected, fill missing columns with -1
+    X_today_selected = X_today_selected.reindex(columns=X_selected.columns, fill_value=-1)
+
+    # Final output confirmation
+    st.write(f"✅ Final selected feature shape: {X_selected.shape}")
+    st.write("🎯 Feature engineering and selection complete.")
+
+    # --- Output preview ---
+    st.write("📋 Preview of today's selected features:")
     st.dataframe(X_today_selected)
 
     # ========== OOS TEST =============
