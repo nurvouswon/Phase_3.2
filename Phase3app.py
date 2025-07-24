@@ -521,8 +521,7 @@ if event_file is not None and today_file is not None:
     # --- Step 3: Combine and re-rank all features (base + cross) ---
     st.write("🧩 Combining base and cross features...")
     X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
-    feature_debug(X_today_selected)
-    st.dataframe(X_today_selected)  # the line that crashes
+
     st.write("📈 Fitting logistic regression to rank combined features...")
     lr = LogisticRegression(max_iter=1000, solver='liblinear')
     lr.fit(X_combined, y)
@@ -542,8 +541,9 @@ if event_file is not None and today_file is not None:
     # Reindex to ensure order matches X_selected, fill missing columns with -1
     X_today_selected = X_today_selected.reindex(columns=X_selected.columns, fill_value=-1)
 
-    # DEBUG: Run feature diagnostics
+    # ✅ DEBUG + Preview (AFTER it's defined)
     feature_debug(X_today_selected)
+    st.dataframe(X_today_selected)
 
     # FIX: Convert everything to float64 for Streamlit compatibility
     try:
@@ -552,6 +552,7 @@ if event_file is not None and today_file is not None:
         st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
     except Exception as e:
         st.error(f"❌ Conversion to float64 failed: {e}")
+
     # Final output confirmation
     st.write(f"✅ Final selected feature shape: {X_selected.shape}")
     st.write("🎯 Feature engineering and selection complete.")
