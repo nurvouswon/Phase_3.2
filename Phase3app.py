@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import gc
 import time
+import psutil
 from datetime import timedelta
 from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -514,16 +515,58 @@ if event_file is not None and today_file is not None:
 
     # --- Step 2: Generate cross-features using interactions ---
     st.write("🔗 Generating cross-features...")
-    poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
-    X_cross = pd.DataFrame(
-        poly.fit_transform(X[top_base_features]),
-        columns=poly.get_feature_names_out(top_base_features)
-    )
 
-    # Deduplicate columns exactly like dedup_columns()
-    X_cross = dedup_columns(X_cross)
+    @st.cache_data(show_spinner=False, max_entries=1)  # Cache to avoid recomputation
+    def generate_cross_features(_X, top_features):
+        try:
+        # Memory check before processing
+            gc.collect()
+            mem_before = psutil.virtual_memory().available / (1024 ** 3)  # GB
+        
+            if mem_before < 2:  # Less than 2GB available
+                st.warning("⚠️ Low memory detected. Using simplified feature crosses.")
+                poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+                X_cross = pd.DataFrame(
+                    poly.fit_transform(_X[top_features].astype(np.float32)),  # Use float32 to save memory
+                    columns=poly.get_feature_names_out(top_features)
+                )
+            else:
+           # Full processing with memory monitoring
+                poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+                X_cross = pd.DataFrame(
+                    poly.fit_transform(_X[top_features]),
+                    columns=poly.get_feature_names_out(top_features)
+                )
+        
+           # Deduplicate and clean
+            X_cross = dedup_columns(X_cross)
+        
+        # Memory cleanup
+            gc.collect()
+            mem_after = psutil.virtual_memory().available / (1024 ** 3)
+            st.write(f"🧠 Memory: {mem_before:.1f}GB → {mem_after:.1f}GB available after cross features")
+        
+            return X_cross
+        
+        except MemoryError:
+            st.error("🚨 Out of memory during cross-feature generation. Falling back to base features.")
+            return pd.DataFrame()  # Return empty as fallback
+        except Exception as e:
+            st.error(f"❌ Cross-feature generation failed: {str(e)}")
+            return pd.DataFrame()
 
-    st.write(f"🔢 Cross-feature matrix shape: {X_cross.shape}")
+    # Generate with monitoring
+    with st.spinner("Creating feature interactions (this may take a minute)..."):
+        X_cross = generate_cross_features(X, top_base_features)
+    
+        if X_cross.empty:
+            st.warning("Using base features only (cross-feature generation failed)")
+            X_cross = pd.DataFrame(index=X.index)  # Empty but preserves row count
+        else:
+        # Validate output
+            nan_inf_check(X_cross, "cross features")
+            st.write(f"🔢 Cross-feature matrix shape: {X_cross.shape}")
+            st.write("Sample cross features:", X_cross.iloc[:, :5].head(3))
 
     # --- Step 3: Combine and re-rank all features (base + cross) ---
     st.write("🧩 Combining base and cross features...")
