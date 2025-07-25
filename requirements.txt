@@ -11,3 +11,4 @@ pyarrow
 polars
 fastparquet
 shap
+psutil
