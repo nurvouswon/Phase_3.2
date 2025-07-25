@@ -507,92 +507,10 @@ if event_file is not None and today_file is not None:
     base_importances = pd.Series(initial_model.feature_importances_, index=X.columns)
 
     # Deduplicate base_importances index if needed (usually not required here, but for safety)
-    base_importances = base_importances.loc[~base_importances.index.duplicated(keep='first')]
-
-    top_base_features = base_importances.sort_values(ascending=False).head(30).index.tolist()
-    st.write("🏆 Top base features selected:", top_base_features)
-
-    # --- Step 2: Generate cross-features using interactions ---
-    st.write("🔗 Generating cross-features...")
-    poly = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
-    X_cross = pd.DataFrame(
-        poly.fit_transform(X[top_base_features]),
-        columns=poly.get_feature_names_out(top_base_features)
-    )
-
-    # Deduplicate columns exactly like dedup_columns()
-    X_cross = X_cross.loc[:, ~X_cross.columns.duplicated(keep='first')]
- 
-    st.write(f"🔢 Cross-feature matrix shape: {X_cross.shape}")
-
-    # --- Step 3: Combine and re-rank all features (base + cross) ---
-    st.write("🧩 Combining base and cross features...")
-    X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
-
-    # Deduplicate combined features too, just in case
-    X_combined = X_combined.loc[:, ~X_combined.columns.duplicated(keep='first')]
-
-    st.write("📈 Fitting logistic regression to rank combined features...")
-    lr = LogisticRegression(max_iter=1000, solver='liblinear')
-    lr.fit(X_combined, y)
-    coefs = pd.Series(np.abs(lr.coef_[0]), index=X_combined.columns)
-
-    # Deduplicate coefficients index just in case
-    coefs = coefs.loc[~coefs.index.duplicated(keep='first')]
-
-    top_combined_features = coefs.sort_values(ascending=False).head(40).index.tolist()
-    st.write("🏁 Top combined features selected:", top_combined_features)
-
-    # --- Final output ---
-    st.write("🧼 Finalizing selected features...")
-
-    X_selected = X_combined[top_combined_features].copy()
-
-    # Align X_today to match columns and fill safely
-    common_cols = X_selected.columns.intersection(X_today.columns)
-    X_today_selected = X_today[common_cols].copy()
-
-    # Reindex to ensure order matches X_selected, fill missing columns with -1
-    X_today_selected = X_today_selected.reindex(columns=X_selected.columns, fill_value=-1)
-
-    # Deduplicate final X_today_selected columns just in case
-    X_today_selected = X_today_selected.loc[:, ~X_today_selected.columns.duplicated(keep='first')]
-
-    # Convert types FIRST before showing
-    try:
-        X_selected = X_selected.astype(np.float64)
-        X_today_selected = X_today_selected.astype(np.float64)
-        st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
-    except Exception as e:
-        st.error(f"❌ Conversion to float64 failed: {e}")
-
-# NOW safe to debug and display
-feature_debug(X_today_selected)
-st.dataframe(X_today_selected)
-
-# Final output confirmation
-st.write(f"✅ Final selected feature shape: {X_selected.shape}")
-st.write("🎯 Feature engineering and selection complete.")
-
-# --- Output preview ---
-st.write("📋 Preview of today's selected features:")
-st.dataframe(X_today_selected)
-    # --- Fill missing values ---
-    st.write("🩹 Filling missing values...")
-    X = X.fillna(-1)
-    X_today = X_today.fillna(-1)
-
-    # --- Step 1: Initial model to rank base features ---
-    st.write("🔬 Training initial XGBoost model to rank base features...")
-    initial_model = XGBClassifier(n_estimators=100, max_depth=4, verbosity=0, random_state=42)
-    initial_model.fit(X, y)
-    base_importances = pd.Series(initial_model.feature_importances_, index=X.columns)
-
-    # Deduplicate base_importances index if needed (usually not required here, but for safety)
     base_importances = base_importances.loc[~base_importances.index.duplicated()]
 
     top_base_features = base_importances.sort_values(ascending=False).head(30).index.tolist()
-    st.write("🏆 Top base features selected:", top_base_features)
+    bst.write("🏆 Top base features selected:", top_base_features)
 
     # --- Step 2: Generate cross-features using interactions ---
     st.write("🔗 Generating cross-features...")
