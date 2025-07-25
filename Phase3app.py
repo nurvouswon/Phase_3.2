@@ -577,11 +577,31 @@ if event_file is not None and today_file is not None:
     # --- Output preview ---
     st.write("📋 Preview of today's selected features:")
     st.dataframe(X_today_selected)
-    # ========== OOS TEST =============
-    OOS_ROWS = 10000
-    X_train, X_oos = X.iloc[:-OOS_ROWS].copy(), X.iloc[-OOS_ROWS:].copy()
-    y_train, y_oos = y.iloc[:-OOS_ROWS].copy(), y.iloc[-OOS_ROWS:].copy()
-    st.write(f"🔒 Automatically reserving last {OOS_ROWS} rows for Out-of-Sample (OOS) test. Using first 30000 for training.")
+        # ========== OOS TEST =============
+    OOS_ROWS = min(10000, len(X) // 4)  # Ensure we don't take more rows than available
+    if len(X) <= OOS_ROWS:
+        st.warning(f"Dataset too small for OOS test. Using all {len(X)} rows for training.")
+        X_train, X_oos = X.copy(), pd.DataFrame()
+        y_train, y_oos = y.copy(), pd.Series()
+    else:
+        X_train, X_oos = X.iloc[:-OOS_ROWS].copy(), X.iloc[-OOS_ROWS:].copy()
+        y_train, y_oos = y.iloc[:-OOS_ROWS].copy(), y.iloc[-OOS_ROWS:].copy()
+    
+    st.write(f"🔒 Using {len(X_train)} rows for training and {len(X_oos)} for OOS test.")
+
+    # ===== Sampling for Streamlit Cloud =====
+    max_rows = 30000
+    if X_train.shape[0] > max_rows:
+        st.warning(f"Training limited to {max_rows} rows for memory (full dataset was {X_train.shape[0]} rows).")
+        X_train = X_train.iloc[:max_rows].copy()
+        y_train = y_train.iloc[:max_rows].copy()
+    
+    # Add validation checks
+    if X_train.empty or y_train.empty:
+        st.error("ERROR: Training data is empty after sampling. Check your dataset size and preprocessing steps.")
+        st.stop()
+    
+    st.write(f"Final training data shape: {X_train.shape}, target shape: {y_train.shape}")
 
     # ===== Sampling for Streamlit Cloud =====
     max_rows = 30000
