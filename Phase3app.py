@@ -564,6 +564,19 @@ if event_file is not None and today_file is not None:
         X_today_selected = X_today_selected.astype(np.float64)
         st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
     except Exception as e:
+        st.error(f"❌ Conversion to float64 failed: {e}")
+
+# NOW safe to debug and display
+feature_debug(X_today_selected)
+st.dataframe(X_today_selected)
+
+# Final output confirmation
+st.write(f"✅ Final selected feature shape: {X_selected.shape}")
+st.write("🎯 Feature engineering and selection complete.")
+
+# --- Output preview ---
+st.write("📋 Preview of today's selected features:")
+st.dataframe(X_today_selected)
     # --- Fill missing values ---
     st.write("🩹 Filling missing values...")
     X = X.fillna(-1)
