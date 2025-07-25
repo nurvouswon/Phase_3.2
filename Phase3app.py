@@ -622,7 +622,7 @@ if event_file is not None and today_file is not None:
     st.dataframe(X_today_selected)
         
     # ========== OOS TEST =============
-    OOS_ROWS = min(10000, len(X) // 4)  # Dynamic OOS size based on dataset
+    OOS_ROWS = min(2000, len(X) // 4)  # Dynamic OOS size based on dataset
     if len(X) <= OOS_ROWS:
         st.warning(f"Dataset too small for OOS test. Using all {len(X)} rows for training.")
         X_train = X.copy()
@@ -770,7 +770,7 @@ if event_file is not None and today_file is not None:
     y_today_bag = test_fold_probas.mean(axis=1)
     
     # ====== OOS TEST =======
-    with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 10,000 rows..."):
+    with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 2,000 rows..."):
         scaler_oos = StandardScaler()
         X_oos_train_scaled = scaler_oos.fit_transform(X_train)
         X_oos_scaled = scaler_oos.transform(X_oos)
