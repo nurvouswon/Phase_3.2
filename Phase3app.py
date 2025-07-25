@@ -577,18 +577,7 @@ if event_file is not None and today_file is not None:
     # --- Output preview ---
     st.write("📋 Preview of today's selected features:")
     st.dataframe(X_today_selected)
-        # ========== OOS TEST =============
-    OOS_ROWS = min(10000, len(X) // 4)  # Ensure we don't take more rows than available
-    if len(X) <= OOS_ROWS:
-        st.warning(f"Dataset too small for OOS test. Using all {len(X)} rows for training.")
-        X_train, X_oos = X.copy(), pd.DataFrame()
-        y_train, y_oos = y.copy(), pd.Series()
-    else:
-        X_train, X_oos = X.iloc[:-OOS_ROWS].copy(), X.iloc[-OOS_ROWS:].copy()
-        y_train, y_oos = y.iloc[:-OOS_ROWS].copy(), y.iloc[-OOS_ROWS:].copy()
-    
-    st.write(f"🔒 Using {len(X_train)} rows for training and {len(X_oos)} for OOS test.")
-
+        
     # ===== Sampling for Streamlit Cloud =====
     max_rows = 30000
     if X_train.shape[0] > max_rows:
@@ -724,55 +713,6 @@ if event_file is not None and today_file is not None:
     # Bagged predictions
     y_val_bag = val_fold_probas.mean(axis=1)
     y_today_bag = test_fold_probas.mean(axis=1)
-
-    # ====== OOS TEST =======
-    with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 10,000 rows..."):
-        scaler_oos = StandardScaler()
-        X_oos_train_scaled = scaler_oos.fit_transform(X_train)
-        X_oos_scaled = scaler_oos.transform(X_oos)
-        tree_models = [
-            xgb.XGBClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
-            lgb.LGBMClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, n_jobs=1),
-            cb.CatBoostClassifier(iterations=120, depth=7, learning_rate=0.08, verbose=0, thread_count=1),
-            GradientBoostingClassifier(n_estimators=120, max_depth=7, learning_rate=0.08)
-        ]
-        hard_models = [
-            RandomForestClassifier(n_estimators=120, max_depth=8, n_jobs=1),
-            LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-        ]
-        oos_preds = []
-        for model in tree_models:
-            model.fit(X_oos_train_scaled, y_train)
-            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
-        for model in hard_models:
-            model.fit(X_oos_train_scaled, y_train)
-            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
-        oos_probs = np.mean(np.column_stack(oos_preds), axis=1)
-        oos_auc = roc_auc_score(y_oos, oos_probs)
-        oos_logloss = log_loss(y_oos, oos_probs)
-        st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
-
-    # ==== OOS: Calibrated Model Performance Display ====
-    st.markdown("### 📊 OOS Calibrated Model Performance (BetaCalibration, Isotonic, Blend)")
-
-    oos_val_bag = np.mean(np.column_stack(oos_preds), axis=1)
-    oos_bc = BetaCalibration(parameters="abm")
-    oos_bc.fit(y_val_bag.reshape(-1,1), y_train)
-    oos_pred_beta = oos_bc.predict(oos_val_bag.reshape(-1,1))
-    oos_ir = IsotonicRegression(out_of_bounds="clip")
-    oos_pred_iso = oos_ir.fit(y_val_bag, y_train).transform(oos_val_bag)
-    oos_pred_blend = 0.5 * oos_pred_beta + 0.5 * oos_pred_iso
-
-    oos_auc_beta = roc_auc_score(y_oos, oos_pred_beta)
-    oos_logloss_beta = log_loss(y_oos, oos_pred_beta)
-    oos_auc_iso = roc_auc_score(y_oos, oos_pred_iso)
-    oos_logloss_iso = log_loss(y_oos, oos_pred_iso)
-    oos_auc_blend = roc_auc_score(y_oos, oos_pred_blend)
-    oos_logloss_blend = log_loss(y_oos, oos_pred_blend)
-
-    st.write(f"**BetaCalibration:**   AUC = {oos_auc_beta:.4f}   |   LogLoss = {oos_logloss_beta:.4f}")
-    st.write(f"**IsotonicRegression:**   AUC = {oos_auc_iso:.4f}   |   LogLoss = {oos_logloss_iso:.4f}")
-    st.write(f"**Blended:**   AUC = {oos_auc_blend:.4f}   |   LogLoss = {oos_logloss_blend:.4f}")
 
     # ===== Calibration =====
     st.write("Calibrating probabilities (BetaCalibration & Isotonic & Blend)...")
