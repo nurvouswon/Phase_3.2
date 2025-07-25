@@ -589,8 +589,9 @@ if event_file is not None and today_file is not None:
         st.warning(f"Training limited to {max_rows} rows for memory (full dataset was {X_train.shape[0]} rows).")
         X_train = X_train.iloc[:max_rows].copy()
         y_train = y_train.iloc[:max_rows].copy()
-    X_train = df_train.drop(columns=[target])
-    y_train = df_train[target]
+    X_train = X_train  # Already defined, no need to modify
+    y_train = y_train  # Already defined
+
     # ---- KFold Setup ----
     n_splits = 4
     n_repeats = 1
