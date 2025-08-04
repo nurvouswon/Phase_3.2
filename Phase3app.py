@@ -681,7 +681,7 @@ if event_file is not None and today_file is not None:
 
         # --- Optimized Tree Model Instantiations ---
     models = {
-        xgb_clf = xgb.XGBClassifier(
+        "XGBoost": xgb.XGBClassifier(
             n_estimators=150,
             max_depth=6,
             learning_rate=0.07,
@@ -691,8 +691,8 @@ if event_file is not None and today_file is not None:
             eval_metric='logloss',
             n_jobs=1,
             verbosity=0
-        )
-        lgb_clf = lgb.LGBMClassifier(
+        ),
+        "LightGBM": lgb.LGBMClassifier(
             n_estimators=150,
             max_depth=7,
             num_leaves=31,
@@ -700,32 +700,33 @@ if event_file is not None and today_file is not None:
             subsample=0.8,
             feature_fraction=0.8,
             n_jobs=1
-        )
-        cat_clf = cb.CatBoostClassifier(
+        ),
+        "CatBoost": cb.CatBoostClassifier(
             iterations=150,
             depth=7,
             learning_rate=0.08,
             verbose=0,
             thread_count=1
-        )
-        rf_clf = RandomForestClassifier(
+        ),
+        "RandomForest": RandomForestClassifier(
             n_estimators=150,
             max_depth=8,
             max_features=0.7,
             min_samples_leaf=2,
             n_jobs=1
-        )
-        gb_clf = GradientBoostingClassifier(
+        ),
+        "GradientBoosting": GradientBoostingClassifier(
             n_estimators=150,
             max_depth=5,
             learning_rate=0.08,
             subsample=0.8
-        )
-        lr_clf = LogisticRegression(
+        ),
+        "LogisticRegression": LogisticRegression(
             max_iter=600,
             solver='lbfgs',
             n_jobs=1
-        )}
+        )
+        }
 
         xgb_clf.fit(X_tr_scaled, y_tr)
         lgb_clf.fit(X_tr_scaled, y_tr)
