@@ -766,7 +766,38 @@ if event_file is not None and today_file is not None:
         est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
         st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
     
-    feature_counts = list(range(40, 201, 20))
+    # Bagged predictions
+    y_val_bag = val_fold_probas.mean(axis=1)
+    y_today_bag = test_fold_probas.mean(axis=1)
+    
+    # ====== OOS TEST =======
+    with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 2,000 rows..."):
+        scaler_oos = StandardScaler()
+        X_oos_train_scaled = scaler_oos.fit_transform(X_train)
+        X_oos_scaled = scaler_oos.transform(X_oos)
+        tree_models = [
+            xgb.XGBClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
+            lgb.LGBMClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, n_jobs=1),
+            cb.CatBoostClassifier(iterations=120, depth=7, learning_rate=0.08, verbose=0, thread_count=1),
+            GradientBoostingClassifier(n_estimators=120, max_depth=7, learning_rate=0.08)
+        ]
+        hard_models = [
+            RandomForestClassifier(n_estimators=120, max_depth=8, n_jobs=1),
+            LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
+        ]
+        oos_preds = []
+        for model in tree_models:
+            model.fit(X_oos_train_scaled, y_train)
+            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
+        for model in hard_models:
+            model.fit(X_oos_train_scaled, y_train)
+            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
+        oos_probs = np.mean(np.column_stack(oos_preds), axis=1)
+        oos_auc = roc_auc_score(y_oos, oos_probs)
+        oos_logloss = log_loss(y_oos, oos_probs)
+        st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
+
+    feature_counts = [40, 60, 80, 100, 120, 140, 160, 180, 200]
     model_scores = {name: [] for name in models.keys()}
 
     # Start optimization loop
@@ -801,37 +832,6 @@ if event_file is not None and today_file is not None:
     ax.legend()
     ax.grid(True)
     st.pyplot(fig)
-    # Bagged predictions
-    y_val_bag = val_fold_probas.mean(axis=1)
-    y_today_bag = test_fold_probas.mean(axis=1)
-    
-    # ====== OOS TEST =======
-    with st.spinner("🔍 Running Out-Of-Sample (OOS) test on last 2,000 rows..."):
-        scaler_oos = StandardScaler()
-        X_oos_train_scaled = scaler_oos.fit_transform(X_train)
-        X_oos_scaled = scaler_oos.transform(X_oos)
-        tree_models = [
-            xgb.XGBClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, use_label_encoder=False, eval_metric='logloss', n_jobs=1, verbosity=0),
-            lgb.LGBMClassifier(n_estimators=120, max_depth=7, learning_rate=0.08, n_jobs=1),
-            cb.CatBoostClassifier(iterations=120, depth=7, learning_rate=0.08, verbose=0, thread_count=1),
-            GradientBoostingClassifier(n_estimators=120, max_depth=7, learning_rate=0.08)
-        ]
-        hard_models = [
-            RandomForestClassifier(n_estimators=120, max_depth=8, n_jobs=1),
-            LogisticRegression(max_iter=600, solver='lbfgs', n_jobs=1)
-        ]
-        oos_preds = []
-        for model in tree_models:
-            model.fit(X_oos_train_scaled, y_train)
-            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
-        for model in hard_models:
-            model.fit(X_oos_train_scaled, y_train)
-            oos_preds.append(model.predict_proba(X_oos_scaled)[:, 1])
-        oos_probs = np.mean(np.column_stack(oos_preds), axis=1)
-        oos_auc = roc_auc_score(y_oos, oos_probs)
-        oos_logloss = log_loss(y_oos, oos_probs)
-        st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
-
     # ==== OOS: Calibrated Model Performance Display ====
     st.markdown("### 📊 OOS Calibrated Model Performance (BetaCalibration, Isotonic, Blend)")
 
