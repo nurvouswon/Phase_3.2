@@ -570,15 +570,13 @@ if event_file is not None and today_file is not None:
 
     # --- Step 3: Combine and re-rank all features (base + cross) ---
     st.write("🧩 Combining base and cross features...")
-    X_combined = pd.concat([X[top_base_features], X_cross], axis=1)
-
-    # Deduplicate combined features too, just in case
-    X_combined = dedup_columns(X_combined)
+    X_train_combined = pd.concat([X_train[top_base_features], X_cross], axis=1)
+    X_train_combined = dedup_columns(X_train_combined)
 
     st.write("📈 Fitting logistic regression to rank combined features...")
     lr = LogisticRegression(max_iter=1000, solver='liblinear')
-    lr.fit(X_combined, y)
-    coefs = pd.Series(np.abs(lr.coef_[0]), index=X_combined.columns)
+    lr.fit(X_train_combined, y_train)
+    coefs = pd.Series(np.abs(lr.coef_[0]), index=X_train_combined.columns)
 
     # Deduplicate coefficients index just in case
     coefs = coefs.loc[~coefs.index.duplicated()]
@@ -590,48 +588,6 @@ if event_file is not None and today_file is not None:
     # --- Final output ---
     st.write("🧼 Finalizing selected features...")
 
-    X_selected = X_combined[top_combined_features].copy()
-
-    # Align X_today to match columns and fill safely
-    common_cols = X_selected.columns.intersection(X_today.columns)
-    X_today_selected = X_today[common_cols].copy()
-
-    # Reindex to ensure order matches X_selected, fill missing columns with -1
-    X_today_selected = X_today_selected.reindex(columns=X_selected.columns, fill_value=-1)
-
-    # Deduplicate final X_today_selected columns just in case
-    X_today_selected = dedup_columns(X_today_selected)
-
-    # Convert types FIRST before showing
-    try:
-        X_selected = X_selected.astype(np.float64)
-        X_today_selected = X_today_selected.astype(np.float64)
-        st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
-    except Exception as e:
-        st.error(f"❌ Conversion to float64 failed: {e}")
-
-    # NOW safe to debug and display
-    feature_debug(X_today_selected)
-    st.dataframe(X_today_selected)
-
-    # Final output confirmation
-    st.write(f"✅ Final selected feature shape: {X_selected.shape}")
-
-    # ========== OOS TEST =============
-    OOS_ROWS = min(2000, len(X) // 4)  # Dynamic OOS size based on dataset
-    if len(X) <= OOS_ROWS:
-        st.warning(f"Dataset too small for OOS test. Using all {len(X)} rows for training.")
-        X_train = X.copy()
-        y_train = y.copy()
-        X_oos = pd.DataFrame()
-        y_oos = pd.Series()
-    else:
-        X_train = X.iloc[:-OOS_ROWS].copy()
-        y_train = y.iloc[:-OOS_ROWS].copy()
-        X_oos = X.iloc[-OOS_ROWS:].copy()
-        y_oos = y.iloc[-OOS_ROWS:].copy()
-
-     # Select top 200 features for training
     X_train_selected = X_train[top_combined_features].copy()
     y_train_selected = y_train.copy()
 
@@ -643,6 +599,41 @@ if event_file is not None and today_file is not None:
         y_train_selected = y_train_selected.iloc[:max_rows].copy()
 
     st.write(f"✅ Final training data: {X_train_selected.shape[0]} rows, {X_train_selected.shape[1]} features")
+
+    # ========== OOS TEST =============
+    OOS_ROWS = min(2000, len(X) // 4)  # Dynamic OOS size based on dataset
+    if len(X) <= OOS_ROWS:
+        st.warning(f"Dataset too small for OOS test. Using all {len(X)} rows for training.")
+        X_oos = pd.DataFrame()
+        y_oos = pd.Series()
+    else:
+        X_oos = X.iloc[-OOS_ROWS:].copy()
+        y_oos = y.iloc[-OOS_ROWS:].copy()
+
+    # Align X_today to match columns and fill safely
+    common_cols = X_train_selected.columns.intersection(X_today.columns)
+    X_today_selected = X_today[common_cols].copy()
+
+    # Reindex to ensure order matches X_train_selected, fill missing columns with -1
+    X_today_selected = X_today_selected.reindex(columns=X_train_selected.columns, fill_value=-1)
+
+    # Deduplicate final X_today_selected columns just in case
+    X_today_selected = dedup_columns(X_today_selected)
+
+    # Convert types FIRST before showing
+    try:
+        X_train_selected = X_train_selected.astype(np.float64)
+        X_today_selected = X_today_selected.astype(np.float64)
+        st.success("✅ Converted feature matrices to float64 for Streamlit compatibility")
+    except Exception as e:
+        st.error(f"❌ Conversion to float64 failed: {e}")
+
+    # NOW safe to debug and display
+    feature_debug(X_today_selected)
+    st.dataframe(X_today_selected)
+
+    # Final output confirmation
+    st.write(f"✅ Final selected feature shape: {X_train_selected.shape}")
 
 
     # ---- KFold Setup ----
