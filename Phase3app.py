@@ -802,7 +802,7 @@ if event_file is not None and today_file is not None:
 
     # Start optimization loop
     for top_n in feature_counts:
-        top_features = final_feature_importance.head(top_n).index.tolist()
+        top_features = X_today_selected.head(top_n).index.tolist()
 
         X_train_selected = X_train[top_features]
         X_val_selected = X_val[top_features]
