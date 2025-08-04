@@ -612,7 +612,44 @@ if event_file is not None and today_file is not None:
     # NOW safe to debug and display
     feature_debug(X_today_selected)
     st.dataframe(X_today_selected)
+    import matplotlib.pyplot as plt
 
+    # Define the feature counts to test
+    feature_counts = list(range(40, 201, 20))
+    model_scores = {name: [] for name in models.keys()}
+
+    # Start optimization loop
+    for top_n in feature_counts:
+        top_features = final_feature_importance.head(top_n).index.tolist()
+
+        X_train_selected = X_train[top_features]
+        X_val_selected = X_val[top_features]
+
+        st.markdown(f"### 🔍 Evaluating Top {top_n} Features...")
+
+        for model_name, model in models.items():
+            try:
+                model.fit(X_train_selected, y_train)
+                score = model.score(X_val_selected, y_val)
+                model_scores[model_name].append(score)
+                st.markdown(f"✅ `{model_name}` with top {top_n} features: **{score:.4f}**")
+            except Exception as e:
+                st.error(f"❌ `{model_name}` failed on top {top_n} features: {e}")
+                model_scores[model_name].append(None)
+
+    # Plotting results
+    st.markdown("## 📈 Model Performance by Feature Count")
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for model_name, scores in model_scores.items():
+        ax.plot(feature_counts, scores, label=model_name, marker='o')
+
+    ax.set_xlabel("Number of Top Features")
+    ax.set_ylabel("Validation Score")
+    ax.set_title("Feature Count vs. Model Performance")
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
     # Final output confirmation
     st.write(f"✅ Final selected feature shape: {X_selected.shape}")
     st.write("🎯 Feature engineering and selection complete.")
