@@ -506,6 +506,7 @@ if event_file is not None and today_file is not None:
     initial_model = XGBClassifier(n_estimators=100, max_depth=4, verbosity=0, random_state=42)
     initial_model.fit(X, y)
     base_importances = pd.Series(initial_model.feature_importances_, index=X.columns)
+    TOP_FEATURES_COUNT = 200
 
     # Deduplicate base_importances index if needed (usually not required here, but for safety)
     base_importances = base_importances.loc[~base_importances.index.duplicated()]
@@ -583,7 +584,7 @@ if event_file is not None and today_file is not None:
     # Deduplicate coefficients index just in case
     coefs = coefs.loc[~coefs.index.duplicated()]
 
-    top_combined_features = coefs.sort_values(ascending=False).head(40).index.tolist()
+    top_combined_features = coefs.sort_values(ascending=False).head(TOP_FEATURES_COUNT).index.tolist()
     st.write("🏁 Top combined features selected:", top_combined_features)
 
     # --- Final output ---
