@@ -506,7 +506,6 @@ if event_file is not None and today_file is not None:
     initial_model = XGBClassifier(n_estimators=100, max_depth=4, verbosity=0, random_state=42)
     initial_model.fit(X, y)
     base_importances = pd.Series(initial_model.feature_importances_, index=X.columns)
-    TOP_FEATURES_COUNT = 200
 
     # Deduplicate base_importances index if needed (usually not required here, but for safety)
     base_importances = base_importances.loc[~base_importances.index.duplicated()]
