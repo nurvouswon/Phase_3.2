@@ -728,45 +728,45 @@ if event_file is not None and today_file is not None:
         )
         }
 
-        xgb_clf.fit(X_tr_scaled, y_tr)
-        lgb_clf.fit(X_tr_scaled, y_tr)
-        cat_clf.fit(X_tr_scaled, y_tr)
-        gb_clf.fit(X_tr_scaled, y_tr)
-        rf_clf.fit(X_tr_scaled, y_tr)
-        lr_clf.fit(X_tr_scaled, y_tr)
+    xgb_clf.fit(X_tr_scaled, y_tr)
+    lgb_clf.fit(X_tr_scaled, y_tr)
+    cat_clf.fit(X_tr_scaled, y_tr)
+    gb_clf.fit(X_tr_scaled, y_tr)
+    rf_clf.fit(X_tr_scaled, y_tr)
+    lr_clf.fit(X_tr_scaled, y_tr)
 
-        val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 6] = rf_clf.predict_proba(X_va_scaled)[:, 1]
-        val_fold_probas[va_idx, 7] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 6] = rf_clf.predict_proba(X_va_scaled)[:, 1]
+    val_fold_probas[va_idx, 7] = lr_clf.predict_proba(X_va_scaled)[:, 1]
 
-        test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        test_fold_probas[:, 3] += gb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        test_fold_probas[:, 4] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        test_fold_probas[:, 5] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        test_fold_probas[:, 6] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-        test_fold_probas[:, 7] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 3] += gb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 4] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 5] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 6] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+    test_fold_probas[:, 7] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
 
-        if fold == 0 and show_shap:
-            with st.spinner("Computing SHAP values (this can be slow)..."):
-                explainer = shap.TreeExplainer(xgb_clf)
-                shap_values = explainer.shap_values(X_va_scaled)
-                st.write("Top SHAP Features (XGB, validation set):")
-                shap.summary_plot(shap_values, pd.DataFrame(X_va_scaled, columns=X_tr.columns), show=False)
-                st.pyplot(bbox_inches='tight')
-                plt.clf()
+    if fold == 0 and show_shap:
+        with st.spinner("Computing SHAP values (this can be slow)..."):
+            explainer = shap.TreeExplainer(xgb_clf)
+            shap_values = explainer.shap_values(X_va_scaled)
+            st.write("Top SHAP Features (XGB, validation set):")
+            shap.summary_plot(shap_values, pd.DataFrame(X_va_scaled, columns=X_tr.columns), show=False)
+            st.pyplot(bbox_inches='tight')
+            plt.clf()
 
-        fold_time = time.time() - t_fold_start
-        fold_times.append(fold_time)
-        avg_time = np.mean(fold_times)
-        est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
-        st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
+    fold_time = time.time() - t_fold_start
+    fold_times.append(fold_time)
+    avg_time = np.mean(fold_times)
+    est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
+    st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
     
     # Bagged predictions
     y_val_bag = val_fold_probas.mean(axis=1)
