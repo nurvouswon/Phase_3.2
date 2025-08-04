@@ -584,6 +584,7 @@ if event_file is not None and today_file is not None:
     # Deduplicate coefficients index just in case
     coefs = coefs.loc[~coefs.index.duplicated()]
 
+    TOP_FEATURES_COUNT = 200
     top_combined_features = coefs.sort_values(ascending=False).head(TOP_FEATURES_COUNT).index.tolist()
     st.write("🏁 Top combined features selected:", top_combined_features)
 
@@ -616,12 +617,7 @@ if event_file is not None and today_file is not None:
 
     # Final output confirmation
     st.write(f"✅ Final selected feature shape: {X_selected.shape}")
-    st.write("🎯 Feature engineering and selection complete.")
 
-    # --- Output preview ---
-    st.write("📋 Preview of today's selected features:")
-    st.dataframe(X_today_selected)
-        
     # ========== OOS TEST =============
     OOS_ROWS = min(2000, len(X) // 4)  # Dynamic OOS size based on dataset
     if len(X) <= OOS_ROWS:
@@ -636,26 +632,19 @@ if event_file is not None and today_file is not None:
         X_oos = X.iloc[-OOS_ROWS:].copy()
         y_oos = y.iloc[-OOS_ROWS:].copy()
 
-    # ===== Sampling for Streamlit Cloud =====
+     # Select top 200 features for training
+    X_train_selected = X_train[top_combined_features].copy()
+    y_train_selected = y_train.copy()
+
+    # Limit training data to 15000 rows for memory constraints
     max_rows = 15000
+    if X_train_selected.shape[0] > max_rows:
+        st.warning(f"Training limited to {max_rows} rows for memory (full dataset was {X_train_selected.shape[0]} rows).")
+        X_train_selected = X_train_selected.iloc[:max_rows].copy()
+        y_train_selected = y_train_selected.iloc[:max_rows].copy()
 
-    # Add defensive checks
-    if 'X_train' not in locals() or X_train.empty:
-        st.error("CRITICAL: X_train not properly initialized. Using full dataset as fallback.")
-        X_train = X.copy()
-        y_train = y.copy()
+    st.write(f"✅ Final training data: {X_train_selected.shape[0]} rows, {X_train_selected.shape[1]} features")
 
-    if X_train.shape[0] > max_rows:
-        st.warning(f"Training limited to {max_rows} rows for memory (full dataset was {X_train.shape[0]} rows).")
-        X_train = X_train.iloc[:max_rows].copy()
-        y_train = y_train.iloc[:max_rows].copy()
-
-    # Final validation
-    if X_train.empty or y_train.empty:
-        st.error("FATAL: No training data available after sampling. Check your input data.")
-        st.stop()
-
-    st.write(f"✅ Final training data: {X_train.shape[0]} rows, {X_train.shape[1]} features")
 
     # ---- KFold Setup ----
     n_splits = 2
