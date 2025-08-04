@@ -612,7 +612,6 @@ if event_file is not None and today_file is not None:
     # NOW safe to debug and display
     feature_debug(X_today_selected)
     st.dataframe(X_today_selected)
-    import matplotlib.pyplot as plt
 
     # Final output confirmation
     st.write(f"✅ Final selected feature shape: {X_selected.shape}")
@@ -637,7 +636,7 @@ if event_file is not None and today_file is not None:
         y_oos = y.iloc[-OOS_ROWS:].copy()
 
     # ===== Sampling for Streamlit Cloud =====
-    max_rows = 15000
+    max_rows = 30000
 
     # Add defensive checks
     if 'X_train' not in locals() or X_train.empty:
@@ -658,7 +657,7 @@ if event_file is not None and today_file is not None:
     st.write(f"✅ Final training data: {X_train.shape[0]} rows, {X_train.shape[1]} features")
 
     # ---- KFold Setup ----
-    n_splits = 2
+    n_splits = 4
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
@@ -680,8 +679,7 @@ if event_file is not None and today_file is not None:
         X_today_scaled = sc.transform(X_today)
 
         # --- Optimized Tree Model Instantiations ---
-    models = {
-        "XGBoost": xgb.XGBClassifier(
+        xgb_clf = xgb.XGBClassifier(
             n_estimators=150,
             max_depth=6,
             learning_rate=0.07,
@@ -691,8 +689,8 @@ if event_file is not None and today_file is not None:
             eval_metric='logloss',
             n_jobs=1,
             verbosity=0
-        ),
-        "LightGBM": lgb.LGBMClassifier(
+        )
+        lgb_clf = lgb.LGBMClassifier(
             n_estimators=150,
             max_depth=7,
             num_leaves=31,
@@ -700,74 +698,73 @@ if event_file is not None and today_file is not None:
             subsample=0.8,
             feature_fraction=0.8,
             n_jobs=1
-        ),
-        "CatBoost": cb.CatBoostClassifier(
+        )
+        cat_clf = cb.CatBoostClassifier(
             iterations=150,
             depth=7,
             learning_rate=0.08,
             verbose=0,
             thread_count=1
-        ),
-        "RandomForest": RandomForestClassifier(
+        )
+        rf_clf = RandomForestClassifier(
             n_estimators=150,
             max_depth=8,
             max_features=0.7,
             min_samples_leaf=2,
             n_jobs=1
-        ),
-        "GradientBoosting": GradientBoostingClassifier(
+        )
+        gb_clf = GradientBoostingClassifier(
             n_estimators=150,
             max_depth=5,
             learning_rate=0.08,
             subsample=0.8
-        ),
-        "LogisticRegression": LogisticRegression(
+        )
+        lr_clf = LogisticRegression(
             max_iter=600,
             solver='lbfgs',
             n_jobs=1
         )
-        }
 
-    xgb_clf.fit(X_tr_scaled, y_tr)
-    lgb_clf.fit(X_tr_scaled, y_tr)
-    cat_clf.fit(X_tr_scaled, y_tr)
-    gb_clf.fit(X_tr_scaled, y_tr)
-    rf_clf.fit(X_tr_scaled, y_tr)
-    lr_clf.fit(X_tr_scaled, y_tr)
+        xgb_clf.fit(X_tr_scaled, y_tr)
+        lgb_clf.fit(X_tr_scaled, y_tr)
+        cat_clf.fit(X_tr_scaled, y_tr)
+        gb_clf.fit(X_tr_scaled, y_tr)
+        rf_clf.fit(X_tr_scaled, y_tr)
+        lr_clf.fit(X_tr_scaled, y_tr)
 
-    val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
-    val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
-    val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
-    val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
-    val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
-    val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
-    val_fold_probas[va_idx, 6] = rf_clf.predict_proba(X_va_scaled)[:, 1]
-    val_fold_probas[va_idx, 7] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 0] = xgb_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 1] = lgb_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 2] = cat_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 3] = gb_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 4] = rf_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 5] = lr_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 6] = rf_clf.predict_proba(X_va_scaled)[:, 1]
+        val_fold_probas[va_idx, 7] = lr_clf.predict_proba(X_va_scaled)[:, 1]
 
-    test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-    test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-    test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-    test_fold_probas[:, 3] += gb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-    test_fold_probas[:, 4] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-    test_fold_probas[:, 5] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-    test_fold_probas[:, 6] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
-    test_fold_probas[:, 7] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 0] += xgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 1] += lgb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 2] += cat_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 3] += gb_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 4] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 5] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 6] += rf_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
+        test_fold_probas[:, 7] += lr_clf.predict_proba(X_today_scaled)[:, 1] / (n_splits * n_repeats)
 
-    if fold == 0 and show_shap:
-        with st.spinner("Computing SHAP values (this can be slow)..."):
-            explainer = shap.TreeExplainer(xgb_clf)
-            shap_values = explainer.shap_values(X_va_scaled)
-            st.write("Top SHAP Features (XGB, validation set):")
-            shap.summary_plot(shap_values, pd.DataFrame(X_va_scaled, columns=X_tr.columns), show=False)
-            st.pyplot(bbox_inches='tight')
-            plt.clf()
+        if fold == 0 and show_shap:
+            with st.spinner("Computing SHAP values (this can be slow)..."):
+                explainer = shap.TreeExplainer(xgb_clf)
+                shap_values = explainer.shap_values(X_va_scaled)
+                st.write("Top SHAP Features (XGB, validation set):")
+                shap.summary_plot(shap_values, pd.DataFrame(X_va_scaled, columns=X_tr.columns), show=False)
+                st.pyplot(bbox_inches='tight')
+                plt.clf()
 
-    fold_time = time.time() - t_fold_start
-    fold_times.append(fold_time)
-    avg_time = np.mean(fold_times)
-    est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
-    st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
-    
+        fold_time = time.time() - t_fold_start
+        fold_times.append(fold_time)
+        avg_time = np.mean(fold_times)
+        est_time_left = avg_time * ((n_splits * n_repeats) - (fold + 1))
+        st.write(f"Fold {fold + 1} finished in {timedelta(seconds=int(fold_time))}. Est. {timedelta(seconds=int(est_time_left))} left.")
+
     # Bagged predictions
     y_val_bag = val_fold_probas.mean(axis=1)
     y_today_bag = test_fold_probas.mean(axis=1)
@@ -799,43 +796,6 @@ if event_file is not None and today_file is not None:
         oos_logloss = log_loss(y_oos, oos_probs)
         st.success(f"OOS AUC: {oos_auc:.4f} | OOS LogLoss: {oos_logloss:.4f}")
 
-    feature_counts = [40, 60, 80, 100, 120, 140, 160, 180, 200]
-    model_scores = {name: [] for name in models.keys()}
-
-    # Start optimization loop
-    for top_n in feature_counts:
-    # Get top N features from your pre-ranked list
-        top_features = X_today_selected[:top_n]
-
-    # Subset your training and validation data
-        X_train_selected = X_train[top_features]
-        X_val_selected = X_val[top_features]
-
-        st.markdown(f"### 🔍 Evaluating Top {top_n} Features...")
-
-        for model_name, model in models.items():
-            try:
-                model.fit(X_train_selected, y_train)
-                score = model.score(X_val_selected, y_val)
-                model_scores[model_name].append(score)
-                st.markdown(f"✅ `{model_name}` with top {top_n} features: **{score:.4f}**")
-            except Exception as e:
-                st.error(f"❌ `{model_name}` failed on top {top_n} features: {e}")
-                model_scores[model_name].append(None)
-
-    # Plotting results
-    st.markdown("## 📈 Model Performance by Feature Count")
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    for model_name, scores in model_scores.items():
-        ax.plot(feature_counts, scores, label=model_name, marker='o')
-
-    ax.set_xlabel("Number of Top Features")
-    ax.set_ylabel("Validation Score")
-    ax.set_title("Feature Count vs. Model Performance")
-    ax.legend()
-    ax.grid(True)
-    st.pyplot(fig)
     # ==== OOS: Calibrated Model Performance Display ====
     st.markdown("### 📊 OOS Calibrated Model Performance (BetaCalibration, Isotonic, Blend)")
 
