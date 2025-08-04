@@ -680,6 +680,7 @@ if event_file is not None and today_file is not None:
         X_today_scaled = sc.transform(X_today)
 
         # --- Optimized Tree Model Instantiations ---
+    models = {
         xgb_clf = xgb.XGBClassifier(
             n_estimators=150,
             max_depth=6,
