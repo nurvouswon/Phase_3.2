@@ -725,7 +725,7 @@ if event_file is not None and today_file is not None:
             max_iter=600,
             solver='lbfgs',
             n_jobs=1
-        )
+        )}
 
         xgb_clf.fit(X_tr_scaled, y_tr)
         lgb_clf.fit(X_tr_scaled, y_tr)
