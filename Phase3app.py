@@ -583,7 +583,7 @@ if event_file is not None and today_file is not None:
     # Deduplicate coefficients index just in case
     coefs = coefs.loc[~coefs.index.duplicated()]
 
-    top_combined_features = coefs.sort_values(ascending=False).head(200).index.tolist()
+    top_combined_features = coefs.sort_values(ascending=False).head(40).index.tolist()
     st.write("🏁 Top combined features selected:", top_combined_features)
 
     # --- Final output ---
@@ -609,15 +609,8 @@ if event_file is not None and today_file is not None:
     except Exception as e:
         st.error(f"❌ Conversion to float64 failed: {e}")
 
-    # Fit the scaler to X_selected
-    sc = StandardScaler()
-    sc.fit(X_selected)
-
-    # Transform X_today_selected using the scaler
-    X_today_selected_scaled = sc.transform(X_today_selected)
-
     # NOW safe to debug and display
-    feature_debug(X_today_selected_scaled)
+    feature_debug(X_today_selected)
     st.dataframe(X_today_selected)
 
     # Final output confirmation
@@ -627,31 +620,28 @@ if event_file is not None and today_file is not None:
     # --- Output preview ---
     st.write("📋 Preview of today's selected features:")
     st.dataframe(X_today_selected)
-
+        
     # ========== OOS TEST =============
-    OOS_ROWS = min(2000, len(X_selected) // 4)  # Use X_selected
-    if len(X_selected) <= OOS_ROWS:
-        st.warning(f"Dataset too small for OOS test. Using all {len(X_selected)} rows for training.")
-        X_train = X_selected.copy()  # Use X_selected
+    OOS_ROWS = min(2000, len(X) // 4)  # Dynamic OOS size based on dataset
+    if len(X) <= OOS_ROWS:
+        st.warning(f"Dataset too small for OOS test. Using all {len(X)} rows for training.")
+        X_train = X.copy()
         y_train = y.copy()
         X_oos = pd.DataFrame()
         y_oos = pd.Series()
     else:
-        X_train = X_selected.iloc[:-OOS_ROWS].copy()  # Use X_selected
+        X_train = X.iloc[:-OOS_ROWS].copy()
         y_train = y.iloc[:-OOS_ROWS].copy()
-        X_oos = X_selected.iloc[-OOS_ROWS:].copy()    # Use X_selected
+        X_oos = X.iloc[-OOS_ROWS:].copy()
         y_oos = y.iloc[-OOS_ROWS:].copy()
-
-    # Transform X_train and X_oos using the scaler
-    X_train_scaled = sc.transform(X_train)
-    X_oos_scaled = sc.transform(X_oos)
 
     # ===== Sampling for Streamlit Cloud =====
     max_rows = 15000
 
+    # Add defensive checks
     if 'X_train' not in locals() or X_train.empty:
-        st.error("CRITICAL: X_train not properly initialized. Using selected features as fallback.")
-        X_train = X_selected.copy()  # Use X_selected
+        st.error("CRITICAL: X_train not properly initialized. Using full dataset as fallback.")
+        X_train = X.copy()
         y_train = y.copy()
 
     if X_train.shape[0] > max_rows:
@@ -667,7 +657,7 @@ if event_file is not None and today_file is not None:
     st.write(f"✅ Final training data: {X_train.shape[0]} rows, {X_train.shape[1]} features")
 
     # ---- KFold Setup ----
-    n_splits = 2
+    n_splits = 3
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
