@@ -609,8 +609,15 @@ if event_file is not None and today_file is not None:
     except Exception as e:
         st.error(f"❌ Conversion to float64 failed: {e}")
 
+    # Fit the scaler to X_selected
+    sc = StandardScaler()
+    sc.fit(X_selected)
+
+    # Transform X_today_selected using the scaler
+    X_today_selected_scaled = sc.transform(X_today_selected)
+
     # NOW safe to debug and display
-    feature_debug(X_today_selected)
+    feature_debug(X_today_selected_scaled)
     st.dataframe(X_today_selected)
 
     # Final output confirmation
@@ -620,7 +627,7 @@ if event_file is not None and today_file is not None:
     # --- Output preview ---
     st.write("📋 Preview of today's selected features:")
     st.dataframe(X_today_selected)
-        
+
     # ========== OOS TEST =============
     OOS_ROWS = min(2000, len(X_selected) // 4)  # Use X_selected
     if len(X_selected) <= OOS_ROWS:
@@ -634,6 +641,10 @@ if event_file is not None and today_file is not None:
         y_train = y.iloc[:-OOS_ROWS].copy()
         X_oos = X_selected.iloc[-OOS_ROWS:].copy()    # Use X_selected
         y_oos = y.iloc[-OOS_ROWS:].copy()
+
+    # Transform X_train and X_oos using the scaler
+    X_train_scaled = sc.transform(X_train)
+    X_oos_scaled = sc.transform(X_oos)
 
     # ===== Sampling for Streamlit Cloud =====
     max_rows = 15000
