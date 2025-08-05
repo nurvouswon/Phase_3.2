@@ -621,29 +621,26 @@ if event_file is not None and today_file is not None:
     st.write("📋 Preview of today's selected features:")
     st.dataframe(X_today_selected)
         
-    # Use X_selected consistently
+    # ========== OOS TEST =============
     OOS_ROWS = min(2000, len(X_selected) // 4)  # Use X_selected
-        X_train = X_selected.iloc[:-OOS_ROWS].copy()  # Use X_selected
-        X_oos = X_selected.iloc[-OOS_ROWS:].copy()    # Use X_selected
-
-    # And in the fallback case:
-        X_train = X_selected.copy()  # Use X_selected, not X
-
+    if len(X_selected) <= OOS_ROWS:
+        st.warning(f"Dataset too small for OOS test. Using all {len(X_selected)} rows for training.")
+        X_train = X_selected.copy()  # Use X_selected
+        y_train = y.copy()
         X_oos = pd.DataFrame()
         y_oos = pd.Series()
     else:
-        X_train = X.iloc[:-OOS_ROWS].copy()
+        X_train = X_selected.iloc[:-OOS_ROWS].copy()  # Use X_selected
         y_train = y.iloc[:-OOS_ROWS].copy()
-        X_oos = X.iloc[-OOS_ROWS:].copy()
+        X_oos = X_selected.iloc[-OOS_ROWS:].copy()    # Use X_selected
         y_oos = y.iloc[-OOS_ROWS:].copy()
 
     # ===== Sampling for Streamlit Cloud =====
     max_rows = 15000
 
-    # Add defensive checks
     if 'X_train' not in locals() or X_train.empty:
-        st.error("CRITICAL: X_train not properly initialized. Using full dataset as fallback.")
-        X_train = X.copy()
+        st.error("CRITICAL: X_train not properly initialized. Using selected features as fallback.")
+        X_train = X_selected.copy()  # Use X_selected
         y_train = y.copy()
 
     if X_train.shape[0] > max_rows:
