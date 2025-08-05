@@ -583,7 +583,7 @@ if event_file is not None and today_file is not None:
     # Deduplicate coefficients index just in case
     coefs = coefs.loc[~coefs.index.duplicated()]
 
-    top_combined_features = coefs.sort_values(ascending=False).head(40).index.tolist()
+    top_combined_features = coefs.sort_values(ascending=False).head(200).index.tolist()
     st.write("🏁 Top combined features selected:", top_combined_features)
 
     # --- Final output ---
@@ -622,26 +622,25 @@ if event_file is not None and today_file is not None:
     st.dataframe(X_today_selected)
         
     # ========== OOS TEST =============
-    OOS_ROWS = min(2000, len(X) // 4)  # Dynamic OOS size based on dataset
-    if len(X) <= OOS_ROWS:
-        st.warning(f"Dataset too small for OOS test. Using all {len(X)} rows for training.")
-        X_train = X.copy()
+    OOS_ROWS = min(2000, len(X_selected) // 4)  # Use X_selected
+    if len(X_selected) <= OOS_ROWS:
+        st.warning(f"Dataset too small for OOS test. Using all {len(X_selected)} rows for training.")
+        X_train = X_selected.copy()  # Use X_selected
         y_train = y.copy()
         X_oos = pd.DataFrame()
         y_oos = pd.Series()
     else:
-        X_train = X.iloc[:-OOS_ROWS].copy()
+        X_train = X_selected.iloc[:-OOS_ROWS].copy()  # Use X_selected
         y_train = y.iloc[:-OOS_ROWS].copy()
-        X_oos = X.iloc[-OOS_ROWS:].copy()
+        X_oos = X_selected.iloc[-OOS_ROWS:].copy()    # Use X_selected
         y_oos = y.iloc[-OOS_ROWS:].copy()
 
     # ===== Sampling for Streamlit Cloud =====
     max_rows = 15000
 
-    # Add defensive checks
     if 'X_train' not in locals() or X_train.empty:
-        st.error("CRITICAL: X_train not properly initialized. Using full dataset as fallback.")
-        X_train = X.copy()
+        st.error("CRITICAL: X_train not properly initialized. Using selected features as fallback.")
+        X_train = X_selected.copy()  # Use X_selected
         y_train = y.copy()
 
     if X_train.shape[0] > max_rows:
@@ -657,7 +656,7 @@ if event_file is not None and today_file is not None:
     st.write(f"✅ Final training data: {X_train.shape[0]} rows, {X_train.shape[1]} features")
 
     # ---- KFold Setup ----
-    n_splits = 6
+    n_splits = 2
     n_repeats = 1
     st.write(f"Preparing KFold splits: X {X_train.shape}, y {y_train.shape}, X_today {X_today.shape}")
 
